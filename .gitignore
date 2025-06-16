@@ -1,0 +1,12 @@
+lib/
+bin/
+O.*/
+dbd/
+db/
+.vscode/
+include/
+iocs/tucamIOC/autosave/
+*.sav*
+records.dbl
+tucamSupport/os/**/*
+st.cmd
