@@ -123,7 +123,8 @@ ADTucam::ADTucam(const char *portName, int cameraId)
   // Initialize new parameters in parameter library
   createParam(ADTucam_TemperatureSetpointString, asynParamFloat64,
               &ADTucam_TemperatureSetpoint);
-  createParam(ADTucam_TemperatureString, asynParamFloat64, &ADTucam_Temperature);
+  createParam(ADTucam_TemperatureString, asynParamFloat64,
+              &ADTucam_Temperature);
   createParam(ADTucam_TemperatureEmergencySignalString, asynParamInt32,
               &ADTucam_TemperatureEmergencySignal);
   createParam(ADTucam_AutoTECThresholdString, asynParamFloat64,
@@ -143,7 +144,8 @@ ADTucam::ADTucam(const char *portName, int cameraId)
   createParam(ADTucam_BitDepthString, asynParamInt32, &ADTucam_BitDepth);
   createParam(ADTucam_FanGearString, asynParamInt32, &ADTucam_FanGear);
   createParam(ADTucam_ImageModeString, asynParamInt32, &ADTucam_ImageMode);
-  createParam(ADTucam_AutoExposureString, asynParamInt32, &ADTucam_AutoExposure);
+  createParam(ADTucam_AutoExposureString, asynParamInt32,
+              &ADTucam_AutoExposure);
   createParam(ADTucam_AutoLevelsString, asynParamInt32, &ADTucam_AutoLevels);
   createParam(ADTucam_HistogramString, asynParamInt32, &ADTucam_Histogram);
   createParam(ADTucam_EnhanceString, asynParamInt32, &ADTucam_Enhance);
@@ -488,7 +490,7 @@ void ADTucam::acquisitionThread() {
  * @returns asynSuccess if read was successful, asynError otherwise
  */
 asynStatus ADTucam::readEnum(asynUser *pasynUser, char *strings[], int values[],
-                            int severities[], size_t nElements, size_t *nIn) {
+                             int severities[], size_t nElements, size_t *nIn) {
   int status = asynSuccess;
   int function = pasynUser->reason;
   const char *functionName = "readEnum";
@@ -1283,7 +1285,8 @@ asynStatus ADTucam::setCurrentTrigger() {
   status = setIntegerParam(ADTriggerMode, triggerHandle_.nTgrMode);
   status = setIntegerParam(ADTucam_TriggerEdge, triggerHandle_.nEdgeMode);
   status = setIntegerParam(ADTucam_TriggerExposure, triggerHandle_.nExpMode);
-  status = setDoubleParam(ADTucam_TriggerDelay, triggerHandle_.nDelayTm / 1.0e6);
+  status =
+      setDoubleParam(ADTucam_TriggerDelay, triggerHandle_.nDelayTm / 1.0e6);
 
   return (asynStatus)status;
 }
@@ -1733,8 +1736,8 @@ asynStatus ADTucam::setCapability(int property, int val) {
  * @returns asynSuccess if read was successful, asynError otherwise
  */
 asynStatus ADTucam::getCapabilityText(int property, char *strings[],
-                                     int values[], int severities[],
-                                     size_t nElements, size_t *nIn) {
+                                      int values[], int severities[],
+                                      size_t nElements, size_t *nIn) {
   static const char *functionName = "getCapabilityText";
   int status = asynSuccess;
   int tucStatus;
@@ -1783,7 +1786,7 @@ asynStatus ADTucam::getCapabilityText(int property, char *strings[],
 static const iocshArg ADTucamConfigArg0 = {"Port name", iocshArgString};
 static const iocshArg ADTucamConfigArg1 = {"Camera Id", iocshArgInt};
 static const iocshArg *const ADTucamConfigArgs[] = {&ADTucamConfigArg0,
-                                                   &ADTucamConfigArg1};
+                                                    &ADTucamConfigArg1};
 
 static const iocshFuncDef configTucam = {"ADTucamConfig", 2, ADTucamConfigArgs};
 

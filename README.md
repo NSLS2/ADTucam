@@ -3,7 +3,7 @@ EPICS areaDetector driver for communicting with detectors using the TUCAM SDK, w
 
 May need minor changes to support other Tucsen cameras.
 
-## Quick Setup 
+## Quick Setup
 
 > NOTE: You must have the TUCAM SDK and EPICS Area Detector installed on your machine before starting.
 

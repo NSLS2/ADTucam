@@ -1,4 +1,4 @@
-exclude: ^axisSupport/
+exclude: ^tucamSupport/
 repos:
   # General pre-commit hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks
