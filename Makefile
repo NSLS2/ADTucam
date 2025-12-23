@@ -5,9 +5,15 @@ DIRS := $(DIRS) configure
 DIRS := $(DIRS) tucamSupport
 DIRS := $(DIRS) tucamApp
 tucamApp_DEPEND_DIRS += tucamSupport
+
+ifeq ($(UNIT_TESTING),YES)
+DIRS := $(DIRS) tests
+tests_DEPEND_DIRS += tucamApp
+else
 ifeq ($(BUILD_IOCS), YES)
 DIRS := $(DIRS) $(filter-out $(DIRS), $(wildcard iocs))
 iocs_DEPEND_DIRS += tucamApp
+endif
 endif
 include $(TOP)/configure/RULES_TOP
 

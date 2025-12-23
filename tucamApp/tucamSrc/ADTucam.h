@@ -40,6 +40,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <mutex>
+#include <unordered_set>
 
 #include "ADDriver.h"
 
@@ -47,7 +48,11 @@
 #include "TUCamApi.h"
 #include "TUDefine.h"
 
+// Camera SDK interface
+#include "ICameraSDK.h"
+
 // Camera property strings
+#define ADTucam_CaptureString "TUCAM_CAPTURE"
 #define ADTucam_TemperatureSetpointString "TUCAM_TEMP_SETPOINT"
 #define ADTucam_TemperatureString "TUCAM_TEMP"
 #define ADTucam_TemperatureEmergencySignalString "TUCAM_TEMP_EMERGENCY"
@@ -99,13 +104,21 @@
 #define ADTucam_TriggerOut3EdgeString "TUCAM_TRGOUT3_EDGE"
 #define ADTucam_TriggerOut3DelayString "TUCAM_TRGOUT3_DLY"
 #define ADTucam_TriggerOut3WidthString "TUCAM_TRGOUT3_WIDTH"
+#define ADTucam_PRNUString "TUCAM_PRNU"
+#define ADTucam_DataFormatString "TUCAM_DATA_FORMAT"
+#define ADTucam_EnableGammaString "TUCAM_ENABLE_GAMMA"
+#define ADTucam_EnableBlackLevelString "TUCAM_ENABLE_BLACK_LEVEL"
 
 class ADTucam : public ADDriver {
  public:
+#ifndef UNIT_TESTING
   ADTucam(const char *portName, int cameraId);
+#endif
+  ADTucam(const char *portName, int cameraId, ICameraSDK *sdkHandler);
   ~ADTucam();
   void monitorTemperatureThread();
   void acquisitionThread();
+  void frameTimeoutThread();
 
   /* These are the methods that we override from ADDriver */
   virtual asynStatus readEnum(asynUser *pasynUser, char *strings[],
@@ -115,8 +128,9 @@ class ADTucam : public ADDriver {
   virtual asynStatus writeFloat64(asynUser *pasynUser, epicsFloat64 value);
 
  protected:
+  int ADTucam_Capture;
+#define FIRST_TUCAM_PARAM ADTucam_Capture
   int ADTucam_TemperatureSetpoint;
-#define FIRST_TUCAM_PARAM ADTucam_TemperatureSetpoint
   int ADTucam_Temperature;
   int ADTucam_TemperatureEmergencySignal;
   int ADTucam_AutoTECThreshold;
@@ -167,55 +181,76 @@ class ADTucam : public ADDriver {
   int ADTucam_TriggerOut3Edge;
   int ADTucam_TriggerOut3Delay;
   int ADTucam_TriggerOut3Width;
-#define LAST_TUCAM_PARAM ADTucam_TriggerOut3Width
+  int ADTucam_PRNU;
+  int ADTucam_DataFormat;
+  int ADTucam_EnableGamma;
+  int ADTucam_EnableBlackLevel;
+#define LAST_TUCAM_PARAM ADTucam_EnableBlackLevel
 
  private:
-  bool acquisitionActive = false;
-  bool monitoringActive = false;
   bool tecActive = false;
-  epicsThreadId monitorThreadId, acquisitionThreadId;
+  /* Whether we should clean up the handler on exit */
+  bool cleanupHandler_;
 
+  void setup();
+  void createParamLibrary();
+  void setupPersistentThreads();
+  void handleStopEvent();
   asynStatus handleTEC(double temperatureVal);
   asynStatus warnOnExtremeTemperature(double temperatureVal);
+  asynStatus handleAcquisitionRequest(int value);
+  asynStatus handleCaptureRequest(int value);
+  asynStatus setAcquirePeriod(double period);
 
-  asynStatus grabImage(double msStartTime);
+  asynStatus grabImage(epicsTimeStamp *startTimeStamp);
+  asynStatus startAcquisition();
+  asynStatus stopAcquisition();
   asynStatus startCapture();
-  asynStatus stopCapture(int acquireStatus);
-  asynStatus startAcquisitionThread();
-  asynStatus stopAcquisitionThread(int acquireStatus);
+  asynStatus stopCapture();
 
   asynStatus connectCamera();
   asynStatus disconnectCamera();
 
   asynStatus setCurrentTrigger();
-  asynStatus setCameraTrigger();
+  asynStatus setCameraTrigger(int triggerMode, int triggerEdge,
+                              int triggerExposure, double triggerDelay);
   asynStatus setCurrentTriggerOut(int port);
-  asynStatus setCameraTriggerOut(int port);
+  asynStatus setCameraTriggerOut(int port, int triggerMode, int triggerEdge,
+                                 double triggerDelay, double triggerWidth);
   asynStatus setCurrentROI();
-  asynStatus setCameraROI();
+  asynStatus setCameraROI(int minX, int minY, int sizeX, int sizeY);
 
   /* camera property control functions */
   asynStatus getCamInfo(int nID, char *sBuf, int &val);
   asynStatus setCamInfo(int param, int nID, int dtype);
   asynStatus setSerialNumber();
-  asynStatus getProperty(int nID, double &value);
+  asynStatus getProperty(int nID, double *value);
   asynStatus setProperty(int nID, double value);
-  asynStatus getCapability(int property, int &value);
+  asynStatus getCapability(int property, int *value);
   asynStatus setCapability(int property, int value);
   asynStatus getCapabilityText(int property, char *strings[], int values[],
                                int severities[], size_t nElements, size_t *nIn);
 
   /* Data */
   int cameraId_;
-  int exiting_;
   TUCAM_INIT apiHandle_;
   TUCAM_OPEN camHandle_;
   TUCAM_FRAME frameHandle_;
   TUCAM_TRIGGER_ATTR triggerHandle_;
   TUCAM_TRGOUT_ATTR triggerOutHandle_[3];
   epicsEventId startEventId_;
+  epicsEventId stopEventId_;
+  epicsEventId startFrameTimeoutEventId_;
+  epicsEventId stopFrameTimeoutEventId_;
+  epicsThreadId acquisitionThreadId_;
+  epicsThreadId monitorTemperatureThreadId_;
+  epicsThreadId frameTimeoutThreadId_;
   NDArray *pRaw_;
   int triggerOutSupport_;
+  ICameraSDK *sdkHandler_;
+  volatile bool shutdownRequested_;
+  bool initialized_;
+  std::unordered_set<int> idleOnlyIntParams_;
 };
 
 #define NUM_TUCAM_PARAMS ((int)(&LAST_TUCAM_PARAM - &FIRST_TUCAM_PARAM + 1))

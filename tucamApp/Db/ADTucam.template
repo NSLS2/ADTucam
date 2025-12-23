@@ -95,6 +95,25 @@ record(mbbi, "$(P)$(R)TriggerMode_RBV")
 #  These records are additional acquisition parameters                        #
 ###############################################################################
 
+record(bo, "$(P)$(R)Capture") {
+   field(DTYP, "asynInt32")
+   field(OUT, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))TUCAM_CAPTURE")
+   field(ZNAM, "Done")
+   field(ONAM, "Capture")
+   field(VAL,  "0")
+   info(asyn:READBACK, "1")
+}
+
+record(bi, "$(P)$(R)Capture_RBV") {
+   field(DTYP, "asynInt32")
+   field(INP, "@asyn($(PORT),$(ADDR=0),$(TIMEOUT=1))TUCAM_CAPTURE")
+   field(ZNAM, "Done")
+   field(ZSV,  "NO_ALARM")
+   field(ONAM, "Acquiring")
+   field(OSV,  "MINOR")
+   field(SCAN, "I/O Intr")
+}
+
 record(ao, "$(P)$(R)TemperatureSetpoint") {
    field(DTYP, "asynFloat64")
    field(OUT,  "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_TEMP_SETPOINT")
@@ -183,9 +202,15 @@ record(mbbo, "$(P)$(R)GainMode") {
    field(ZRVL, "0")
    field(ONVL, "1")
    field(TWVL, "2")
+   field(THVL, "3")
+   field(FRVL, "4")
+   field(FVVL, "5")
    field(ZRST, "HDR")
-   field(ONST, "HighGain")
-   field(TWST, "LowGain")
+   field(ONST, "High Gain")
+   field(TWST, "Low Gain")
+   field(THST, "HDR DSNU Off")
+   field(FRST, "High Gain DSNU Off")
+   field(FVST, "Low Gain DSNU Off")
 }
 
 record(mbbi, "$(P)$(R)GainMode_RBV") {
@@ -196,9 +221,15 @@ record(mbbi, "$(P)$(R)GainMode_RBV") {
    field(ZRVL, "0")
    field(ONVL, "1")
    field(TWVL, "2")
+   field(THVL, "3")
+   field(FRVL, "4")
+   field(FVVL, "5")
    field(ZRST, "HDR")
-   field(ONST, "HighGain")
-   field(TWST, "LowGain")
+   field(ONST, "High Gain")
+   field(TWST, "Low Gain")
+   field(THST, "HDR DSNU Off")
+   field(FRST, "High Gain DSNU Off")
+   field(FVST, "Low Gain DSNU Off")
 }
 
 record(bo, "$(P)$(R)RetryOnTimeout") {
@@ -526,6 +557,7 @@ record(mbbo, "$(P)$(R)FrameFormat")
    field(PINI, "YES")
    field(DTYP, "asynInt32")
    field(OUT,  "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_FRAME_FORMAT")
+   field(VAL, "0")
    field(ZRST, "Raw")
    field(ZRVL, "0")
    field(ONST, "Usual")
@@ -539,6 +571,7 @@ record(mbbi, "$(P)$(R)FrameFormat_RBV")
    field(DTYP, "asynInt32")
    field(INP,  "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_FRAME_FORMAT")
    field(SCAN, "I/O Intr")
+   field(VAL, "0")
    field(ZRST, "Raw")
    field(ZRVL, "0")
    field(ONST, "Usual")
@@ -1038,4 +1071,83 @@ record(ai, "$(P)$(R)TriggerOut3Width_RBV")
    field(SCAN, "I/O Intr")
    field(PREC, "6")
    field(EGU,  "s")
+}
+
+record(bo, "$(P)$(R)PRNU")
+{
+    field(DTYP, "asynInt32")
+    field(OUT, "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_PRNU")
+    field(ZNAM, "Disabled")
+    field(ONAM, "Enabled")
+    field(VAL, "0")
+    field(PINI, "YES")
+}
+
+record(bi, "$(P)$(R)PRNU_RBV") {
+    field(DTYP, "asynInt32")
+    field(INP, "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_PRNU")
+    field(ZNAM, "Disabled")
+    field(ONAM, "Enabled")
+    field(VAL, "0")
+    field(SCAN, "I/O Intr")
+}
+
+record(mbbo, "$(P)$(R)DataFormat") {
+   field(DTYP, "asynInt32")
+   field(OUT, "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_DATA_FORMAT")
+   field(PINI, "YES")
+   field(VAL, "1")
+   field(ZRVL, "0")
+   field(ONVL, "1")
+   field(ZRST, "YUV")
+   field(ONST, "RAW")
+}
+
+record(mbbi, "$(P)$(R)DataFormat_RBV") {
+   field(DTYP, "asynInt32")
+   field(INP, "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_DATA_FORMAT")
+   field(SCAN, "I/O Intr")
+   field(VAL, "1")
+   field(ZRVL, "0")
+   field(ONVL, "1")
+   field(ZRST, "YUV")
+   field(ONST, "RAW")
+}
+
+record(bo, "$(P)$(R)EnableGamma")
+{
+    field(DTYP, "asynInt32")
+    field(OUT, "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_ENABLE_GAMMA")
+    field(ZNAM, "Disabled")
+    field(ONAM, "Enabled")
+    field(VAL, "0")
+    field(PINI, "YES")
+}
+
+record(bi, "$(P)$(R)EnableGamma_RBV") {
+    field(DTYP, "asynInt32")
+    field(INP, "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_ENABLE_GAMMA")
+    field(ZNAM, "Disabled")
+    field(ONAM, "Enabled")
+    field(VAL, "0")
+    field(SCAN, "I/O Intr")
+}
+
+record(bo, "$(P)$(R)EnableBlackLevel")
+{
+    field(DTYP, "asynInt32")
+    field(OUT, "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_ENABLE_BLACK_LEVEL")
+    field(ZNAM, "Disabled")
+    field(ONAM, "Enabled")
+    field(VAL, "0")
+    field(PINI, "YES")
+}
+
+record(bi, "$(P)$(R)EnableBlackLevel_RBV") {
+    field(DTYP, "asynInt32")
+    field(INP, "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_ENABLE_BLACK_LEVEL")
+    field(ZNAM, "Disabled")
+    field(ONAM, "Enabled")
+    field(VAL, "0")
+    field(SCAN, "I/O Intr")
 }

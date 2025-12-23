@@ -7,13 +7,14 @@
  *
  * Copyright (c): Brookhaven National Laboratory 2025
  */
-#include "ADTucam.h"
-
 #include <algorithm>
-#include <chrono>
+#include <cstdio>
 
-// TUCAM include
-#include "TUCamApi.h"
+// SDK Handler
+#include "ADTucam.h"
+#ifndef UNIT_TESTING
+#include "TUCAMSDKHandler.h"
+#endif
 
 #define DRIVER_VERSION 1
 #define DRIVER_REVISION 0
@@ -26,7 +27,7 @@
 
 #define ERR_ARGS(fmt, ...)                                                    \
   asynPrint(pasynUserSelf, ASYN_TRACE_ERROR, "%s::%s: " fmt "\n", driverName, \
-            functionName, __VA_ARGS__);
+            functionName, __VA_ARGS__)
 
 // Warning message formatters
 #define WARN(msg)                                                          \
@@ -35,7 +36,7 @@
 
 #define WARN_ARGS(fmt, ...)                                         \
   asynPrint(pasynUserSelf, ASYN_TRACE_WARNING, "%s::%s: " fmt "\n", \
-            driverName, functionName, __VA_ARGS__);
+            driverName, functionName, __VA_ARGS__)
 
 // Info message formatters
 #define INFO(msg)                                                       \
@@ -44,17 +45,18 @@
 
 #define INFO_ARGS(fmt, ...)                                                  \
   asynPrint(pasynUserSelf, ASYN_TRACE_FLOW, "%s::%s: " fmt "\n", driverName, \
-            functionName, __VA_ARGS__);
+            functionName, __VA_ARGS__)
 
 // Debug message formatters
-#define DEBUG(msg)                                                      \
-  asynPrint(pasynUserSelf, ASYN_TRACE_FLOW, "%s::%s: %s\n", driverName, \
+#define DEBUG(msg)                                                          \
+  asynPrint(pasynUserSelf, ASYN_TRACEIO_DRIVER, "%s::%s: %s\n", driverName, \
             functionName, msg)
 
-#define DEBUG_ARGS(fmt, ...)                                                 \
-  asynPrint(pasynUserSelf, ASYN_TRACE_FLOW, "%s::%s: " fmt "\n", driverName, \
-            functionName, __VA_ARGS__);
+#define DEBUG_ARGS(fmt, ...)                                         \
+  asynPrint(pasynUserSelf, ASYN_TRACEIO_DRIVER, "%s::%s: " fmt "\n", \
+            driverName, functionName, __VA_ARGS__)
 
+#ifndef UNIT_TESTING
 /**
  * @brief Function that instatiates a driver object. Called from IOC shell
  *
@@ -63,6 +65,7 @@ extern "C" int ADTucamConfig(const char *portName, int cameraId) {
   new ADTucam(portName, cameraId);
   return (asynSuccess);
 }
+#endif
 
 /**
  * @brief Wrapper C function passed to epicsThreadCreate to create temperature
@@ -85,6 +88,16 @@ static void acquisitionThreadC(void *drvPvt) {
 }
 
 /**
+ * @brief Wrapper C function passed to epicsThreadCreate to create timeout
+ * thread
+ * @param drvPvt Pointer to instance of ADTucam driver object
+ */
+static void frameTimeoutThreadC(void *drvPvt) {
+  ADTucam *pPvt = (ADTucam *)drvPvt;  // NOLINT(readability/casting)
+  pPvt->frameTimeoutThread();
+}
+
+/**
  * @brief Callback function called when exit is ran from IOC shell, deletes
  * driver object instance
  * @param drvPvt Pointer to instance of ADTucam driver object
@@ -96,6 +109,7 @@ static void exitCallbackC(void *drvPvt) {
 
 /**
  * Formats currently supported by the camera SDK.
+ * DO NOT CHANGE THE ORDER OF THESE VALUES.
  */
 static const int frameFormats[3] = {TUFRM_FMT_RAW, TUFRM_FMT_USUAl,
                                     TUFRM_FMT_RGB888};
@@ -103,6 +117,7 @@ static const int frameFormats[3] = {TUFRM_FMT_RAW, TUFRM_FMT_USUAl,
 static const char *driverName = "ADTucam";
 static int TUCAMInitialized = 0;
 
+#ifndef UNIT_TESTING
 /**
  * @brief Main constructor for ADTucam driver
  *
@@ -112,15 +127,36 @@ static int TUCAMInitialized = 0;
 ADTucam::ADTucam(const char *portName, int cameraId)
     : ADDriver(portName, 1, NUM_TUCAM_PARAMS, 0, 0, 0, 0, 0, 1, 0, 0),
       cameraId_(cameraId),
-      exiting_(0),
       pRaw_(NULL),
-      triggerOutSupport_(0) {
-  const char *functionName = "ADTucam";
+      triggerOutSupport_(0),
+      sdkHandler_(new TUCAMSDKHandler()),
+      initialized_(false) {
+  this->cleanupHandler_ = true;
+  this->setup();
+}
+#endif
 
-  char versionString[20];
-  asynStatus status = asynSuccess;
+/**
+ * @brief Constructor for ADTucam driver with dependency injection
+ *
+ * @param portName Unique asyn port name
+ * @param cameraId ID of the camera used to connect
+ * @param sdkHandler Pointer to SDK handler (for testing/mocking)
+ */
+ADTucam::ADTucam(const char *portName, int cameraId, ICameraSDK *sdkHandler)
+    : ADDriver(portName, 1, NUM_TUCAM_PARAMS, 0, 0, 0, 0, 0, 1, 0, 0),
+      cameraId_(cameraId),
+      pRaw_(NULL),
+      triggerOutSupport_(0),
+      sdkHandler_(sdkHandler),
+      initialized_(false) {
+  this->cleanupHandler_ = false;
+  this->setup();
+}
 
+void ADTucam::createParamLibrary() {
   // Initialize new parameters in parameter library
+  createParam(ADTucam_CaptureString, asynParamInt32, &ADTucam_Capture);
   createParam(ADTucam_TemperatureSetpointString, asynParamFloat64,
               &ADTucam_TemperatureSetpoint);
   createParam(ADTucam_TemperatureString, asynParamFloat64,
@@ -194,8 +230,74 @@ ADTucam::ADTucam(const char *portName, int cameraId)
               &ADTucam_TriggerOut3Delay);
   createParam(ADTucam_TriggerOut3WidthString, asynParamFloat64,
               &ADTucam_TriggerOut3Width);
+  createParam(ADTucam_PRNUString, asynParamInt32, &ADTucam_PRNU);
+  createParam(ADTucam_DataFormatString, asynParamInt32, &ADTucam_DataFormat);
+  createParam(ADTucam_EnableGammaString, asynParamInt32, &ADTucam_EnableGamma);
+  createParam(ADTucam_EnableBlackLevelString, asynParamInt32,
+              &ADTucam_EnableBlackLevel);
+
+  /* Initialize the idle only int params, these cannot be changed while
+   * acquiring */
+  this->idleOnlyIntParams_ = {ADTriggerMode,
+                              ADTucam_TriggerOut1Mode,
+                              ADTucam_TriggerOut2Mode,
+                              ADTucam_TriggerOut3Mode,
+                              ADTucam_Capture,
+                              ADTucam_BinMode,
+                              ADMinX,
+                              ADMinY,
+                              ADSizeX,
+                              ADSizeY};
+}
+
+void ADTucam::setupPersistentThreads() {
+  this->startEventId_ = epicsEventCreate(epicsEventEmpty);
+  this->stopEventId_ = epicsEventCreate(epicsEventEmpty);
+  this->startFrameTimeoutEventId_ = epicsEventCreate(epicsEventEmpty);
+  this->stopFrameTimeoutEventId_ = epicsEventCreate(epicsEventEmpty);
+  this->shutdownRequested_ = false;
+
+  /* Launch acquisition thread */
+  epicsThreadOpts acquisitionThreadOpts;
+  acquisitionThreadOpts.priority = epicsThreadPriorityMedium;
+  acquisitionThreadOpts.stackSize =
+      epicsThreadGetStackSize(epicsThreadStackMedium);
+  acquisitionThreadOpts.joinable = 1;
+  this->acquisitionThreadId_ = epicsThreadCreateOpt(
+      "ADTucamAcquisitionThread", (EPICSTHREADFUNC)acquisitionThreadC, this,
+      &acquisitionThreadOpts);
+
+  /* Launch temperature monitoring task */
+  epicsThreadOpts monitorTemperatureThreadOpts;
+  monitorTemperatureThreadOpts.priority = epicsThreadPriorityMedium;
+  monitorTemperatureThreadOpts.stackSize =
+      epicsThreadGetStackSize(epicsThreadStackMedium);
+  monitorTemperatureThreadOpts.joinable = 1;
+  this->monitorTemperatureThreadId_ =
+      epicsThreadCreateOpt("ADTucamMonitorTemperatureThread",
+                           (EPICSTHREADFUNC)monitorTemperatureThreadC, this,
+                           &monitorTemperatureThreadOpts);
+
+  /* Launch timeout thread */
+  epicsThreadOpts frameTimeoutThreadOpts;
+  frameTimeoutThreadOpts.priority = epicsThreadPriorityMedium;
+  frameTimeoutThreadOpts.stackSize =
+      epicsThreadGetStackSize(epicsThreadStackMedium);
+  frameTimeoutThreadOpts.joinable = 1;
+  this->frameTimeoutThreadId_ = epicsThreadCreateOpt(
+      "ADTucamFrameTimeoutThread", (EPICSTHREADFUNC)frameTimeoutThreadC, this,
+      &frameTimeoutThreadOpts);
+}
+
+void ADTucam::setup() {
+  const char *functionName = "setup";
+  char versionString[20];
+  asynStatus status = asynSuccess;
+
+  this->createParamLibrary();
 
   /* Set initial values for some parameters */
+  setIntegerParam(ADAcquire, 0);
   setIntegerParam(NDDataType, NDUInt16);
   setIntegerParam(NDColorMode, NDColorModeMono);
   setIntegerParam(NDArraySizeZ, 0);
@@ -208,58 +310,115 @@ ADTucam::ADTucam(const char *portName, int cameraId)
 
   status = this->connectCamera();
   if (status != asynSuccess) {
-    ERR("camera connection failed");
-    TUCAM_Api_Uninit();
+    ERR("Camera connection failed");
     setIntegerParam(ADStatus, ADStatusDisconnected);
-    setStringParam(ADStatusMessage, "camera connection failed");
+    setStringParam(ADStatusMessage, "Camera connection failed");
     callParamCallbacks();
     report(stdout, 1);
     return;
   }
   callParamCallbacks();
 
-  startEventId_ = epicsEventCreate(epicsEventEmpty);
-  /* Launch temperature monitoring task */
-  this->monitoringActive = true;
-  epicsThreadOpts opts;
-  opts.priority = epicsThreadPriorityMedium;
-  opts.stackSize = epicsThreadGetStackSize(epicsThreadStackMedium);
-  opts.joinable = 1;
-  epicsThreadCreateOpt("ADTucamMonitorTemperatureThread",
-                       (EPICSTHREADFUNC)monitorTemperatureThreadC, this, &opts);
+  this->setupPersistentThreads();
 
-  /* Launch shutdown task */
-  epicsAtExit(exitCallbackC, (void *)this);  // NOLINT(readability/casting)
+  /* Register shutdown task */
+  if (this->cleanupHandler_) {
+    epicsAtExit(exitCallbackC, (void *)this);  // NOLINT(readability/casting)
+  }
+
+  // Mark initialization as complete
+  this->initialized_ = true;
 }
 
 /**
  * @brief ADTucam destructor, called on exit to cleanup spawned threads.
  */
 ADTucam::~ADTucam() {
-  const char *functionName = "~ADTucam";
+  int acquisitionRequested;
 
-  // Stop acquisiton if active
-  this->stopAcquisitionThread(ADStatusIdle);
+  if (this->initialized_) {
+    // Signal threads to shutdown
+    this->shutdownRequested_ = true;
+    if (this->acquisitionThreadId_) {
+      // Stop acquisition if we are currently acquiring
+      getIntegerParam(ADAcquire, &acquisitionRequested);
+      if (acquisitionRequested == 1) {
+        this->stopAcquisition();
+      }
+      // Wake up acquisition thread so it can exit cleanly
+      this->startAcquisition();
+      epicsThreadMustJoin(this->acquisitionThreadId_);
+    }
+    if (this->monitorTemperatureThreadId_) {
+      epicsThreadMustJoin(this->monitorTemperatureThreadId_);
+    }
+    if (this->frameTimeoutThreadId_) {
+      // Wake up the frame timeout thread so it can exit cleanly
+      epicsEventSignal(this->startFrameTimeoutEventId_);
+      epicsEventSignal(this->stopFrameTimeoutEventId_);
+      epicsThreadMustJoin(this->frameTimeoutThreadId_);
+    }
 
-  if (this->monitoringActive) {
-    INFO("Shutting down monitor thread...");
-    this->monitoringActive = false;
-    epicsThreadMustJoin(this->monitorThreadId);
-    INFO("Done.");
-  }
-
-  if (this->camHandle_.hIdxTUCam != NULL) {
-    INFO("Closing Camera...");
     this->disconnectCamera();
+
+    epicsEventDestroy(this->startEventId_);
+    epicsEventDestroy(this->stopEventId_);
+    epicsEventDestroy(this->startFrameTimeoutEventId_);
+    epicsEventDestroy(this->stopFrameTimeoutEventId_);
   }
 
-  if (TUCAMInitialized == 1) {
-    // uninitialize SDK
-    INFO("Uninitializing SDK...");
-    TUCAMInitialized--;
-    TUCAM_Api_Uninit();
-    INFO("Done.");
+  if (this->cleanupHandler_) {
+    delete sdkHandler_;
   }
+}
+
+/**
+ * @brief Thread that aborts waiting for the next frame if it exceeds a certain
+ * timeout.
+ */
+void ADTucam::frameTimeoutThread() {
+  const char *functionName = "frameTimeoutThread";
+  TUCAMRET tucStatus;
+  int triggerMode;
+  double timeout, acquireTime, acquirePeriod;
+  epicsEventStatus startEventStatus;
+  epicsEventStatus stopEventStatus = epicsEventWaitTimeout;
+
+  while (!this->shutdownRequested_) {
+    startEventStatus = epicsEventWait(this->startFrameTimeoutEventId_);
+    if (startEventStatus != epicsEventWaitOK) {
+      ERR("Failed to wait for timeout event");
+      continue;
+    }
+
+    this->lock();
+    getIntegerParam(ADTriggerMode, &triggerMode);
+    if (triggerMode == TUCCM_SEQUENCE ||
+        triggerMode == TUCCM_TRIGGER_SOFTWARE) {
+      /* Calculate the timeout */
+      getDoubleParam(ADAcquireTime, &acquireTime);
+      getDoubleParam(ADAcquirePeriod, &acquirePeriod);
+      timeout = (acquireTime + acquirePeriod) + 30.0;
+      this->unlock();
+
+      /* Wait for the timeout */
+      stopEventStatus =
+          epicsEventWaitWithTimeout(this->stopFrameTimeoutEventId_, timeout);
+      if (stopEventStatus == epicsEventWaitTimeout) {
+        ERR_ARGS("Aborting wait for frame due to timeout: %f seconds", timeout);
+        tucStatus = sdkHandler_->abortWait(this->camHandle_.hIdxTUCam);
+        if (tucStatus != TUCAMRET_SUCCESS) {
+          ERR_ARGS("unable to abort wait for frame, tucStatus=(0x%x)",
+                   tucStatus);
+        }
+        epicsEventWait(this->stopFrameTimeoutEventId_);
+      }
+    } else {
+      this->unlock();
+      epicsEventWait(this->stopFrameTimeoutEventId_);
+    }
+  }
+  INFO("Frame timeout thread shutting down.");
 }
 
 /**
@@ -305,7 +464,7 @@ asynStatus ADTucam::warnOnExtremeTemperature(double temperatureVal) {
  */
 asynStatus ADTucam::handleTEC(double temperatureVal) {
   const char *functionName = "handleTEC";
-  asynStatus status = asynSuccess;
+  int status = asynSuccess;
   int tecStatus;
   double tecThreshold;
 
@@ -315,30 +474,28 @@ asynStatus ADTucam::handleTEC(double temperatureVal) {
   if (this->tecActive && temperatureVal > tecThreshold) {
     WARN_ARGS("Temperature exceeds %f degrees: %f!!", tecThreshold,
               temperatureVal);
-    TUCAM_Capa_SetValue(this->camHandle_.hIdxTUCam, TUIDC_ENABLETEC, 0);
-    TUCAM_Capa_GetValue(this->camHandle_.hIdxTUCam, TUIDC_ENABLETEC,
-                        &tecStatus);
+    status |= setCapability(TUIDC_ENABLETEC, 0);
+    status |= getCapability(TUIDC_ENABLETEC, &tecStatus);
     if (tecStatus == 0) {
       WARN("TEC DISABLED.");
       this->tecActive = false;
     }
-    status = setIntegerParam(ADTucam_TECStatus, tecStatus);
+    status |= setIntegerParam(ADTucam_TECStatus, tecStatus);
   } else if (!this->tecActive && temperatureVal <= tecThreshold) {
     // TEC is inactive but we are below the threshold
     // We assume a temperature gradient is present
     WARN_ARGS("Temperature has reached an acceptable value for TEC: %f",
               temperatureVal);
-    TUCAM_Capa_SetValue(this->camHandle_.hIdxTUCam, TUIDC_ENABLETEC, 1);
-    TUCAM_Capa_GetValue(this->camHandle_.hIdxTUCam, TUIDC_ENABLETEC,
-                        &tecStatus);
+    status |= setCapability(TUIDC_ENABLETEC, 1);
+    status |= getCapability(TUIDC_ENABLETEC, &tecStatus);
     if (tecStatus == 1) {
       WARN("TEC ENABLED.");
       this->tecActive = true;
     }
-    status = setIntegerParam(ADTucam_TECStatus, tecStatus);
+    status |= setIntegerParam(ADTucam_TECStatus, tecStatus);
   }
 
-  return status;
+  return (asynStatus)status;
 }
 
 /**
@@ -350,10 +507,9 @@ void ADTucam::monitorTemperatureThread() {
   int autoTEC;
   INFO("Temperature monitor thread active.");
 
-  while (this->monitoringActive) {
-    lock();
-    TUCAM_Prop_GetValue(this->camHandle_.hIdxTUCam, TUIDP_TEMPERATURE,
-                        &temperatureVal);
+  while (!this->shutdownRequested_) {
+    this->lock();
+    this->getProperty(TUIDP_TEMPERATURE, &temperatureVal);
     setDoubleParam(ADTucam_Temperature, temperatureVal);
     this->warnOnExtremeTemperature(temperatureVal);
     // Auto-enable/disable TEC
@@ -361,119 +517,206 @@ void ADTucam::monitorTemperatureThread() {
     if (autoTEC) {
       this->handleTEC(temperatureVal);
     }
-    unlock();
     callParamCallbacks();
-    epicsThreadSleep(1);
+    this->unlock();
+    epicsThreadSleep(1.0);
   }
+  INFO("Temperature monitor thread shutting down.");
 }
 
-/**
- * @brief Captures images from the camera and sends them to the areaDetector
- * plugin.
- */
-void ADTucam::acquisitionThread() {
-  const char *functionName = "acquisitionThread";
-  int status, tucStatus;
-  int acquiring;
+void ADTucam::handleStopEvent() {
+  const char *functionName = "handleStopEvent";
   int imageMode;
-  int arrayCallbacks;
-  int targetNumImages, arrayCounter, imageCounter;
-  int numImages;
   int triggerMode;
-  int retryOnTimeout, numRetries, retryCounter = 0;
-  NDColorMode_t colorMode = NDColorModeMono;  // only grayscale at the moment
-  NDDataType_t dataType = NDUInt16;           //  only 16 bit unsigned for now.
 
-  // Lock the driver to prevent concurrent writes to params
-  // This is important to ensure that the camera is not being configured
-  // while we are capturing images.
-  this->lock();
+  /* If the trigger mode is free run, we need to stop the capture
+   * Otherwise, clients should stop the capture themselves */
+  getIntegerParam(ADTriggerMode, &triggerMode);
+  if (triggerMode == TUCCM_SEQUENCE) {
+    this->stopCapture();
+    setIntegerParam(ADTucam_Capture, 0);
+  }
 
-  // Start capturing...
-  status = this->startCapture();
-  if (status == asynError) {
-    ERR("Failed to start capturing!");
-    this->unlock();
-    return;
+  getIntegerParam(ADImageMode, &imageMode);
+  if (imageMode == ADImageContinuous) {
+    setIntegerParam(ADStatus, ADStatusIdle);
+    setStringParam(ADStatusMessage, "Waiting for acquisition");
+    INFO("Acquistion stopped");
+  } else {
+    setIntegerParam(ADStatus, ADStatusAborted);
+    setStringParam(ADStatusMessage, "Acquisition aborted");
+    INFO("Acquistion aborted");
   }
   callParamCallbacks();
+}
 
-  // Get the time that the camera capturing started for proper timestamping
-  // later.
-  std::chrono::system_clock::time_point startTime =
-      std::chrono::system_clock::now();
-  int64_t nsStartTime = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            startTime.time_since_epoch())
-                            .count();
-  double msStartTime = nsStartTime * 1.e-6;
+void ADTucam::acquisitionThread() {
+  int status = asynSuccess;
+  int eventStatus;
+  int imageCounter;
+  int numImages, numImagesCounter;
+  int imageMode;
+  int triggerMode;
+  int capturing;
+  int arrayCallbacks;
+  int numRetries, retryOnTimeout;
+  int retryCounter = 0;
+  bool acquire = false;
+  NDArray *pImage;
+  epicsTimeStamp startTime;
+  const char *functionName = "acquisitionThread";
 
-  while (this->acquisitionActive) {
-    // Retrieve any variable settings from PVs
-    getIntegerParam(ADNumImages, &targetNumImages);
-    getIntegerParam(ADTucam_RetryOnTimeout, &retryOnTimeout);
-    getIntegerParam(ADTucam_NumRetries, &numRetries);
+  this->lock();
 
-    status = this->grabImage(msStartTime);
-    if (status == asynError) {
-      if (this->pRaw_) this->pRaw_->release();
-      this->pRaw_ = NULL;
-      if (!this->acquisitionActive) {
-        this->unlock();
-        setIntegerParam(ADStatus, ADStatusIdle);
-        setStringParam(ADStatusMessage, "Acquisition aborted by user");
+  while (true) {
+    /* Wait for acquisition to start */
+    if (!acquire) {
+      INFO("Waiting for acquisition to start...");
+      this->unlock();
+      eventStatus = epicsEventWait(this->startEventId_);
+      this->lock();
+      if (eventStatus != epicsEventWaitOK) {
+        ERR("Failed to wait for acquisition start event");
+        setIntegerParam(ADStatus, ADStatusError);
+        setStringParam(ADStatusMessage,
+                       "Failed to wait for acquisition start event");
+        setIntegerParam(ADAcquire, 0);
         callParamCallbacks();
-        return;
-      }
-      if (retryOnTimeout == 1 && retryCounter < numRetries) {
-        retryCounter++;
-        WARN_ARGS("Failed to grab image, retry %d out of %d...", retryCounter,
-                  numRetries);
+        acquire = false;
         continue;
       }
-      this->stopCapture(ADStatusError);
-      // Unlock the driver to allow other threads to access it
-      setStringParam(ADStatusMessage, "Failed to grab image!");
-      this->unlock();
-      callParamCallbacks();
-      return;
+      if (this->shutdownRequested_) {
+        break;
+      }
+      INFO("Starting acquisition...");
+      getIntegerParam(ADTucam_Capture, &capturing);
+      if (!capturing) {
+        status = this->startCapture();
+        if (status != asynSuccess) {
+          ERR("Failed to start capture");
+          setIntegerParam(ADStatus, ADStatusError);
+          setStringParam(ADStatusMessage, "Failed to start capture");
+          setIntegerParam(ADAcquire, 0);
+          callParamCallbacks();
+          continue;
+        }
+        setIntegerParam(ADTucam_Capture, 1);
+      }
+      acquire = true;
+      setStringParam(ADStatusMessage, "Acquiring...");
+      setIntegerParam(ADNumImagesCounter, 0);
+      retryCounter = 0;
     }
-    retryCounter = 0;
-    getIntegerParam(NDArrayCounter, &arrayCounter);
-    getIntegerParam(ADNumImages, &numImages);
-    getIntegerParam(ADNumImagesCounter, &imageCounter);
+
+    /* Acquisition is active */
+    epicsTimeGetCurrent(&startTime);
     getIntegerParam(ADImageMode, &imageMode);
-    getIntegerParam(NDArrayCallbacks, &arrayCallbacks);
+    setIntegerParam(ADStatus, ADStatusAcquire);
+    callParamCallbacks();
 
-    arrayCounter++;
-    imageCounter++;
-
-    setIntegerParam(NDArrayCounter, arrayCounter);
-    setIntegerParam(ADNumImagesCounter, imageCounter);
-
-    // Perform plugin callbacks on collected frame
-    if (arrayCallbacks) {
-      this->unlock();
-      // NOTE: Can be an expensive operation depending on plugin configuration
-      doCallbacksGenericPointer(this->pRaw_, NDArrayData, 0);
-      this->lock();
+    /* Check if the acquisition was stopped */
+    this->unlock();
+    eventStatus = epicsEventWaitWithTimeout(this->stopEventId_, 1e-5);
+    this->lock();
+    if (eventStatus == epicsEventWaitOK) {
+      this->handleStopEvent();
+      acquire = false;
+      continue;
     }
 
-    // Free array buffer
+    /* Grab the next frame */
+    status = this->grabImage(&startTime);
+    if (status != asynSuccess) {
+      if (this->pRaw_) this->pRaw_->release();
+      this->pRaw_ = NULL;
+
+      /* Check if acquisition was stopped or failed */
+      this->unlock();
+      eventStatus = epicsEventWaitWithTimeout(this->stopEventId_, 1e-5);
+      this->lock();
+      if (eventStatus == epicsEventWaitOK) {
+        this->handleStopEvent();
+        acquire = false;
+      } else {
+        ERR("Failed to grab image");
+        /* Handle retry logic */
+        getIntegerParam(ADTucam_NumRetries, &numRetries);
+        getIntegerParam(ADTucam_RetryOnTimeout, &retryOnTimeout);
+        if (retryOnTimeout && retryCounter < numRetries) {
+          ++retryCounter;
+          setIntegerParam(ADStatus, ADStatusError);
+          char retryMessage[256];
+          snprintf(retryMessage, sizeof(retryMessage),
+                   "Retrying acquisition (attempt %d of %d)...", retryCounter,
+                   numRetries);
+          setStringParam(ADStatusMessage, retryMessage);
+        } else {
+          this->stopCapture();
+          setIntegerParam(ADTucam_Capture, 0);
+          setIntegerParam(ADStatus, ADStatusError);
+          setStringParam(ADStatusMessage, "Failed to grab image");
+          setIntegerParam(ADAcquire, 0);
+          acquire = false;
+        }
+        callParamCallbacks();
+      }
+      continue;
+    }
+
+    /* Update the status */
+    setIntegerParam(ADStatus, ADStatusReadout);
+    callParamCallbacks();
+
+    /* Update the image statistics */
+    pImage = this->pRaw_;
+
+    getIntegerParam(NDArrayCounter, &imageCounter);
+    getIntegerParam(ADNumImages, &numImages);
+    getIntegerParam(ADNumImagesCounter, &numImagesCounter);
+    getIntegerParam(NDArrayCallbacks, &arrayCallbacks);
+    imageCounter++;
+    numImagesCounter++;
+    setIntegerParam(NDArrayCounter, imageCounter);
+    setIntegerParam(ADNumImagesCounter, numImagesCounter);
+
+    pImage->uniqueId = imageCounter;
+    updateTimeStamp(&pImage->epicsTS);
+
+    /* Perform plugin callbacks */
+    if (arrayCallbacks) {
+      INFO("Performing plugin callbacks...");
+      doCallbacksGenericPointer(pImage, NDArrayData, 0);
+    }
+
+    /* Free array buffer */
     if (this->pRaw_) this->pRaw_->release();
     this->pRaw_ = NULL;
 
-    callParamCallbacks();
-    // If in single mode, finish acq, if in multiple mode and reached target
-    // number complete acquisition.
-    if (imageMode == ADImageSingle ||
-        (imageMode == ADImageMultiple && imageCounter == targetNumImages)) {
-      break;
+    /* Check if we have reached the end of the acquisition */
+    if ((imageMode == ADImageSingle) ||
+        ((imageMode == ADImageMultiple) && (numImagesCounter >= numImages))) {
+      /* If the trigger mode is free run, we need to stop the capture
+       * Otherwise, clients should stop the capture themselves */
+      getIntegerParam(ADTriggerMode, &triggerMode);
+      if (triggerMode == TUCCM_SEQUENCE) {
+        status = this->stopCapture();
+        if (status != asynSuccess) {
+          ERR("Failed to stop capture");
+        } else {
+          setIntegerParam(ADTucam_Capture, 0);
+        }
+      }
+      setStringParam(ADStatusMessage, "Waiting for acquisition");
+      setIntegerParam(ADStatus, ADStatusIdle);
+      setIntegerParam(ADAcquire, 0);
+      INFO("Acquisition complete");
+      acquire = false;
     }
+
+    callParamCallbacks();
   }
-  setStringParam(ADStatusMessage, "Acquisition completed");
-  this->stopCapture(ADStatusIdle);
   this->unlock();
-  callParamCallbacks();
+  INFO("Acquisition thread shutting down.");
 }
 
 /**
@@ -493,7 +736,6 @@ asynStatus ADTucam::readEnum(asynUser *pasynUser, char *strings[], int values[],
                              int severities[], size_t nElements, size_t *nIn) {
   int status = asynSuccess;
   int function = pasynUser->reason;
-  const char *functionName = "readEnum";
 
   if (function == ADTucam_BinMode) {
     status = getCapabilityText(TUIDC_RESOLUTION, strings, values, severities,
@@ -505,9 +747,48 @@ asynStatus ADTucam::readEnum(asynUser *pasynUser, char *strings[], int values[],
   return (asynStatus)status;
 }
 
+asynStatus ADTucam::handleAcquisitionRequest(int value) {
+  int status = asynSuccess;
+  int currentRequest;
+
+  getIntegerParam(ADAcquire, &currentRequest);
+  if (value == 1 && currentRequest == 0) {
+    status |= this->startAcquisition();
+    status |= setIntegerParam(ADAcquire, value);
+  } else if (value == 0 && currentRequest == 1) {
+    status |= this->stopAcquisition();
+    status |= setIntegerParam(ADAcquire, value);
+  } else {
+    status = asynError;
+  }
+  return (asynStatus)status;
+}
+
+asynStatus ADTucam::handleCaptureRequest(int value) {
+  int status = asynSuccess;
+  int currentRequest;
+
+  getIntegerParam(ADTucam_Capture, &currentRequest);
+  if (value == 1 && currentRequest == 0) {
+    status |= this->startCapture();
+  } else if (value == 0 && currentRequest == 1) {
+    status |= this->stopCapture();
+  } else {
+    status = asynError;
+  }
+  if (status == asynSuccess) {
+    status |= setIntegerParam(ADTucam_Capture, value);
+  }
+
+  return (asynStatus)status;
+}
+
 /**
  * @brief Override of ADDriver function - performs callbacks on write events to
  * int PVs
+ *
+ * NOTE: Driver is assumed to be locked when this function is called.
+ *       This happens already when called from asynPortDriver::writeInt32.
  *
  * @param pasynUser Pointer to record asynUser instance
  * @param value Value written to PV
@@ -519,34 +800,39 @@ asynStatus ADTucam::writeInt32(asynUser *pasynUser, epicsInt32 value) {
   int status = asynSuccess;
   int tucStatus;
   int function = pasynUser->reason;
-  int currentExpRes;
+  int readback;
+  int acquiring;
+  const char *paramName;
+  asynStatus nameStatus;
 
-  /* Set the parameter and readback in the parameter library.  This may be
-   * overwritten when we read back the status at the end, but that's OK */
-  status = setIntegerParam(function, value);
+  nameStatus = this->getParamName(function, &paramName);
+  if (nameStatus == asynSuccess) {
+    INFO_ARGS("requested, function=%s, value=%d", paramName, value);
+  } else {
+    INFO_ARGS("requested, function=%d, value=%d", function, value);
+  }
+
+  getIntegerParam(ADAcquire, &acquiring);
+  if (acquiring && this->idleOnlyIntParams_.find(function) !=
+                       this->idleOnlyIntParams_.end()) {
+    this->getParamName(function, &paramName);
+    ERR_ARGS("Cannot change parameter %s while acquiring!", paramName);
+    return asynError;
+  }
 
   if (function == ADAcquire) {
-    if (this->acquisitionActive && value == 0) {
-      this->stopAcquisitionThread(ADStatusIdle);
-    } else if (!this->acquisitionActive && value == 1) {
-      this->startAcquisitionThread();
-    } else if (value == 0) {
-      ERR("Acquisition not active!");
-      status = asynError;
-    } else {
-      ERR("Acquisition already active!");
-      status = asynError;
-    }
+    status |= this->handleAcquisitionRequest(value);
+  } else if (function == ADTucam_Capture) {
+    status |= this->handleCaptureRequest(value);
   } else if (function == ADTucam_TECStatus) {
-    int tecStatus;
-    TUCAM_Capa_SetValue(this->camHandle_.hIdxTUCam, TUIDC_ENABLETEC, value);
-    TUCAM_Capa_GetValue(this->camHandle_.hIdxTUCam, TUIDC_ENABLETEC,
-                        &tecStatus);
-    if (tecStatus == 1) {
-      DEBUG("Enabled TEC");
+    status |= setCapability(TUIDC_ENABLETEC, value);
+    status |= getCapability(TUIDC_ENABLETEC, &readback);
+    status |= setIntegerParam(function, readback);
+    if (readback == 1) {
+      INFO("Enabled TEC!");
       this->tecActive = true;
     } else {
-      DEBUG("Disabled TEC!");
+      INFO("Disabled TEC!");
       this->tecActive = false;
     }
   } else if (function == ADTucam_GainMode) {
@@ -556,168 +842,319 @@ asynStatus ADTucam::writeInt32(asynUser *pasynUser, epicsInt32 value) {
     //  0 -> HDR
     //  1 -> HighGain
     //  2 -> LowGain
+    //  3 -> HDR NO DSNU
+    //  4 -> HighGain NO DSNU
+    //  5 -> LowGain NO DSNU
     double gainMode;
-    TUCAM_Prop_SetValue(this->camHandle_.hIdxTUCam, TUIDP_GLOBALGAIN,
-                        static_cast<double>(value));
-    TUCAM_Prop_GetValue(this->camHandle_.hIdxTUCam, TUIDP_GLOBALGAIN,
-                        &gainMode);
-    status = setIntegerParam(ADTucam_GainMode, static_cast<int>(gainMode));
-    if (gainMode != value) {
-      ERR_ARGS("Failed to set gain mode to %d. Readback shows %d.", value,
-               static_cast<int>(gainMode));
-    } else {
-      INFO_ARGS("Successfully set gain mode to %d.",
-                static_cast<int>(gainMode));
-    }
+    status |= setProperty(TUIDP_GLOBALGAIN, static_cast<double>(value));
+    status |= getProperty(TUIDP_GLOBALGAIN, &gainMode);
+    readback = static_cast<int>(gainMode);
+    status |= setIntegerParam(function, readback);
   } else if (function == ADTucam_BinMode) {
     // Set the binninig mode.
     // Possible values are:
     //  0 -> None
     //  1 -> 2x2
     //  2 -> 4x4
-    // Requires the driver lock to be held to prevent writes
-    // while the camera is acquiring images.
-    this->lock();
-    if (this->acquisitionActive) {
-      ERR("Cannot change binning mode while acquisition is active!");
-      this->unlock();
+    tucStatus = sdkHandler_->releaseBuffer(this->camHandle_.hIdxTUCam);
+    if (tucStatus != TUCAMRET_SUCCESS) {
+      ERR_ARGS("Failed to release camera buffer, tucStatus=(0x%x)", tucStatus);
       return asynError;
     }
-    int binMode;
     status |= setCapability(TUIDC_RESOLUTION, value);
-    getCapability(TUIDC_RESOLUTION, binMode);
-    status |= setIntegerParam(ADTucam_BinMode, binMode);
-    status |= setCurrentROI();
-    this->unlock();
-  } else if (function == ADMinX || function == ADMinY || function == ADSizeX ||
-             function == ADSizeY) {
-    this->lock();
-    if (this->acquisitionActive) {
-      ERR("Cannot change ROI while acquisition is active!");
-      this->unlock();
+    if (status != asynSuccess) {
+      ERR("Failed to set binning mode!");
+      // Re-allocate the old buffer
+      tucStatus = sdkHandler_->allocateBuffer(this->camHandle_.hIdxTUCam,
+                                              &this->frameHandle_);
+      if (tucStatus != TUCAMRET_SUCCESS) {
+        ERR_ARGS(
+            "Failed to re-allocate the old camera buffer, tucStatus=(0x%x)",
+            tucStatus);
+      }
       return asynError;
     }
-    status |= setCameraROI();
+    tucStatus = sdkHandler_->allocateBuffer(this->camHandle_.hIdxTUCam,
+                                            &this->frameHandle_);
+    if (tucStatus != TUCAMRET_SUCCESS) {
+      ERR_ARGS("Failed to allocate camera buffer, tucStatus=(0x%x)", tucStatus);
+      return asynError;
+    }
+    /* Readback the binning mode and new ROI */
+    status |= getCapability(TUIDC_RESOLUTION, &readback);
+    status |= setIntegerParam(function, readback);
     status |= setCurrentROI();
-    this->unlock();
+  } else if (function == ADMinX) {
+    int minY, sizeX, sizeY;
+    getIntegerParam(ADMinY, &minY);
+    getIntegerParam(ADSizeX, &sizeX);
+    getIntegerParam(ADSizeY, &sizeY);
+    status |= setCameraROI(value, minY, sizeX, sizeY);
+    status |= setCurrentROI();
+  } else if (function == ADMinY) {
+    int minX, sizeX, sizeY;
+    getIntegerParam(ADMinX, &minX);
+    getIntegerParam(ADSizeX, &sizeX);
+    getIntegerParam(ADSizeY, &sizeY);
+    status |= setCameraROI(minX, value, sizeX, sizeY);
+    status |= setCurrentROI();
+  } else if (function == ADSizeX) {
+    int minX, minY, sizeY;
+    getIntegerParam(ADMinX, &minX);
+    getIntegerParam(ADMinY, &minY);
+    getIntegerParam(ADSizeY, &sizeY);
+    status |= setCameraROI(minX, minY, value, sizeY);
+    status |= setCurrentROI();
+  } else if (function == ADSizeY) {
+    int minX, minY, sizeX;
+    getIntegerParam(ADMinX, &minX);
+    getIntegerParam(ADMinY, &minY);
+    getIntegerParam(ADSizeX, &sizeX);
+    status |= setCameraROI(minX, minY, sizeX, value);
+    status |= setCurrentROI();
   } else if (function == ADReverseX) {
-    status = setCapability(TUIDC_HORIZONTAL, value);
-    status = getCapability(TUIDC_HORIZONTAL, value);
-    if (status) {
-      value = 0;
-    }
-    status = setIntegerParam(ADReverseX, value);
+    status |= setCapability(TUIDC_HORIZONTAL, value);
+    status |= getCapability(TUIDC_HORIZONTAL, &readback);
+    status |= setIntegerParam(function, readback);
   } else if (function == ADReverseY) {
-    status = setCapability(TUIDC_VERTICAL, value);
-    status = getCapability(TUIDC_VERTICAL, value);
-    if (status) {
-      value = 0;
-    }
-    status = setIntegerParam(ADReverseY, value);
-  } else if (function == ADTriggerMode || function == ADTucam_TriggerExposure) {
-    status = this->setCameraTrigger();
-    status = this->setCurrentTrigger();
-  } else if (function == ADTucam_TriggerOut1Mode ||
-             function == ADTucam_TriggerOut1Edge) {
-    if (triggerOutSupport_) {
-      status = this->setCameraTriggerOut(0);
-      status = this->setCurrentTriggerOut(0);
+    status |= setCapability(TUIDC_VERTICAL, value);
+    status |= getCapability(TUIDC_VERTICAL, &readback);
+    status |= setIntegerParam(function, readback);
+  } else if (function == ADTriggerMode) {
+    int triggerEdge, triggerExposure;
+    double triggerDelay;
+    getIntegerParam(ADTucam_TriggerEdge, &triggerEdge);
+    getIntegerParam(ADTucam_TriggerExposure, &triggerExposure);
+    getDoubleParam(ADTucam_TriggerDelay, &triggerDelay);
+    status |= this->setCameraTrigger(value, triggerEdge, triggerExposure,
+                                     triggerDelay);
+    status |= this->setCurrentTrigger();
+  } else if (function == ADTucam_TriggerExposure) {
+    int triggerMode, triggerEdge;
+    double triggerDelay;
+    getIntegerParam(ADTriggerMode, &triggerMode);
+    getIntegerParam(ADTucam_TriggerEdge, &triggerEdge);
+    getDoubleParam(ADTucam_TriggerDelay, &triggerDelay);
+    status |=
+        this->setCameraTrigger(triggerMode, triggerEdge, value, triggerDelay);
+    status |= this->setCurrentTrigger();
+  } else if (function == ADTucam_TriggerEdge) {
+    int triggerMode, triggerExposure;
+    double triggerDelay;
+    getIntegerParam(ADTriggerMode, &triggerMode);
+    getIntegerParam(ADTucam_TriggerExposure, &triggerExposure);
+    getDoubleParam(ADTucam_TriggerDelay, &triggerDelay);
+    status |= this->setCameraTrigger(triggerMode, value, triggerExposure,
+                                     triggerDelay);
+    status |= this->setCurrentTrigger();
+  } else if (function == ADTucam_TriggerOut1Mode) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut1Edge;
+      double triggerOut1Delay, triggerOut1Width;
+      getIntegerParam(ADTucam_TriggerOut1Edge, &triggerOut1Edge);
+      getDoubleParam(ADTucam_TriggerOut1Delay, &triggerOut1Delay);
+      getDoubleParam(ADTucam_TriggerOut1Width, &triggerOut1Width);
+      status |= this->setCameraTriggerOut(0, value, triggerOut1Edge,
+                                          triggerOut1Delay, triggerOut1Width);
+      status |= this->setCurrentTriggerOut(0);
     } else {
-      status = setIntegerParam(function, 0);
+      status |= setStringParam(ADStatusMessage, "Trigger out 1 not supported");
+      status |= asynError;
     }
-  } else if (function == ADTucam_TriggerOut2Mode ||
-             function == ADTucam_TriggerOut2Edge) {
-    if (triggerOutSupport_) {
-      status = this->setCameraTriggerOut(1);
-      status = this->setCurrentTriggerOut(1);
+  } else if (function == ADTucam_TriggerOut1Edge) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut1Mode;
+      double triggerOut1Delay, triggerOut1Width;
+      getIntegerParam(ADTucam_TriggerOut1Mode, &triggerOut1Mode);
+      getDoubleParam(ADTucam_TriggerOut1Delay, &triggerOut1Delay);
+      getDoubleParam(ADTucam_TriggerOut1Width, &triggerOut1Width);
+      status |= this->setCameraTriggerOut(0, triggerOut1Mode, value,
+                                          triggerOut1Delay, triggerOut1Width);
+      status |= this->setCurrentTriggerOut(0);
     } else {
-      status |= setIntegerParam(function, 0);
+      status |= setStringParam(ADStatusMessage, "Trigger out 1 not supported");
+      status |= asynError;
     }
-  } else if (function == ADTucam_TriggerOut3Mode ||
-             function == ADTucam_TriggerOut3Edge) {
-    if (triggerOutSupport_) {
-      status |= this->setCameraTriggerOut(2);
+  } else if (function == ADTucam_TriggerOut2Mode) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut2Edge;
+      double triggerOut2Delay, triggerOut2Width;
+      getIntegerParam(ADTucam_TriggerOut2Edge, &triggerOut2Edge);
+      getDoubleParam(ADTucam_TriggerOut2Delay, &triggerOut2Delay);
+      getDoubleParam(ADTucam_TriggerOut2Width, &triggerOut2Width);
+      status |= this->setCameraTriggerOut(1, value, triggerOut2Edge,
+                                          triggerOut2Delay, triggerOut2Width);
+      status |= this->setCurrentTriggerOut(1);
+    } else {
+      status |= setStringParam(ADStatusMessage, "Trigger out 2 not supported");
+      status |= asynError;
+    }
+  } else if (function == ADTucam_TriggerOut2Edge) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut2Mode;
+      double triggerOut2Delay, triggerOut2Width;
+      getIntegerParam(ADTucam_TriggerOut2Mode, &triggerOut2Mode);
+      getDoubleParam(ADTucam_TriggerOut2Delay, &triggerOut2Delay);
+      getDoubleParam(ADTucam_TriggerOut2Width, &triggerOut2Width);
+      status |= this->setCameraTriggerOut(1, triggerOut2Mode, value,
+                                          triggerOut2Delay, triggerOut2Width);
+      status |= this->setCurrentTriggerOut(1);
+    } else {
+      status |= setStringParam(ADStatusMessage, "Trigger out 2 not supported");
+      status |= asynError;
+    }
+  } else if (function == ADTucam_TriggerOut3Mode) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut3Edge;
+      double triggerOut3Delay, triggerOut3Width;
+      getIntegerParam(ADTucam_TriggerOut3Edge, &triggerOut3Edge);
+      getDoubleParam(ADTucam_TriggerOut3Delay, &triggerOut3Delay);
+      getDoubleParam(ADTucam_TriggerOut3Width, &triggerOut3Width);
+      status |= this->setCameraTriggerOut(2, value, triggerOut3Edge,
+                                          triggerOut3Delay, triggerOut3Width);
       status |= this->setCurrentTriggerOut(2);
     } else {
-      status |= setIntegerParam(function, 0);
+      status |= setStringParam(ADStatusMessage, "Trigger out 3 not supported");
+      status |= asynError;
+    }
+  } else if (function == ADTucam_TriggerOut3Edge) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut3Mode;
+      double triggerOut3Delay, triggerOut3Width;
+      getIntegerParam(ADTucam_TriggerOut3Mode, &triggerOut3Mode);
+      getDoubleParam(ADTucam_TriggerOut3Delay, &triggerOut3Delay);
+      getDoubleParam(ADTucam_TriggerOut3Width, &triggerOut3Width);
+      status |= this->setCameraTriggerOut(2, triggerOut3Mode, value,
+                                          triggerOut3Delay, triggerOut3Width);
+      status |= this->setCurrentTriggerOut(2);
+    } else {
+      status |= setStringParam(ADStatusMessage, "Trigger out 3 not supported");
+      status |= asynError;
     }
   } else if (function == ADTucam_FrameFormat) {
     frameHandle_.ucFormatGet = frameFormats[value];
+    // TUIDC_DATAFORMAT is 0 for YUV and 1 for RAW
+    int dataFormat = frameFormats[value] == TUFRM_FMT_RAW ? 1 : 0;
+    status |= setCapability(TUIDC_DATAFORMAT, dataFormat);
+    status |= getCapability(TUIDC_DATAFORMAT, &dataFormat);
+    status |= setIntegerParam(ADTucam_DataFormat, dataFormat);
+    status |= setIntegerParam(function, value);
   } else if (function == ADTucam_BitDepth) {
     status |= setCapability(TUIDC_BITOFDEPTH, value);
-    status |= getCapability(TUIDC_BITOFDEPTH, value);
-    status |= setIntegerParam(function, value);
+    status |= getCapability(TUIDC_BITOFDEPTH, &readback);
+    status |= setIntegerParam(function, readback);
   } else if (function == ADTucam_FanGear) {
     status |= setCapability(TUIDC_FAN_GEAR, value);
-    status |= getCapability(TUIDC_FAN_GEAR, value);
-    status |= setIntegerParam(function, value);
+    status |= getCapability(TUIDC_FAN_GEAR, &readback);
+    status |= setIntegerParam(function, readback);
   } else if (function == ADTucam_ImageMode) {
     status |= setCapability(TUIDC_IMGMODESELECT, value);
-    status |= getCapability(TUIDC_IMGMODESELECT, value);
-    status |= setIntegerParam(function, value);
+    status |= getCapability(TUIDC_IMGMODESELECT, &readback);
+    status |= setIntegerParam(function, readback);
   } else if (function == ADTucam_AutoExposure) {
     status |= setCapability(TUIDC_ATEXPOSURE, value);
-    status |= getCapability(TUIDC_ATEXPOSURE, value);
-    status |= setIntegerParam(function, value);
+    status |= getCapability(TUIDC_ATEXPOSURE, &readback);
+    status |= setIntegerParam(function, readback);
   } else if (function == ADTucam_AutoLevels) {
     status |= setCapability(TUIDC_ATLEVELS, value);
-    status |= getCapability(TUIDC_ATLEVELS, value);
-    status |= setIntegerParam(function, value);
+    status |= getCapability(TUIDC_ATLEVELS, &readback);
+    status |= setIntegerParam(function, readback);
     int hist = (value != 0);
     status |= setCapability(TUIDC_HISTC, hist);
-    status |= getCapability(TUIDC_HISTC, hist);
+    status |= getCapability(TUIDC_HISTC, &hist);
     status |= setIntegerParam(ADTucam_Histogram, hist);
   } else if (function == ADTucam_Histogram) {
     status |= setCapability(TUIDC_HISTC, value);
-    status |= getCapability(TUIDC_HISTC, value);
-    status |= setIntegerParam(function, value);
+    status |= getCapability(TUIDC_HISTC, &readback);
+    status |= setIntegerParam(function, readback);
   } else if (function == ADTucam_Enhance) {
     status |= setCapability(TUIDC_ENHANCE, value);
-    status |= getCapability(TUIDC_ENHANCE, value);
-    status |= setIntegerParam(function, value);
+    status |= getCapability(TUIDC_ENHANCE, &readback);
+    status |= setIntegerParam(function, readback);
   } else if (function == ADTucam_DefectCorr) {
     status |= setCapability(TUIDC_DFTCORRECTION, value);
-    status |= getCapability(TUIDC_DFTCORRECTION, value);
-    status |= setIntegerParam(function, value);
+    status |= getCapability(TUIDC_DFTCORRECTION, &readback);
+    status |= setIntegerParam(function, readback);
   } else if (function == ADTucam_Denoise) {
     status |= setCapability(TUIDC_ENABLEDENOISE, value);
-    status |= getCapability(TUIDC_ENABLEDENOISE, value);
-    status |= setIntegerParam(function, value);
+    status |= getCapability(TUIDC_ENABLEDENOISE, &readback);
+    status |= setIntegerParam(function, readback);
   } else if (function == ADTucam_FlatCorr) {
     status |= setCapability(TUIDC_FLTCORRECTION, value);
-    status |= getCapability(TUIDC_FLTCORRECTION, value);
+    status |= getCapability(TUIDC_FLTCORRECTION, &readback);
+    status |= setIntegerParam(function, readback);
+  } else if (function == ADTucam_PRNU) {
+    status |= setCapability(TUIDC_ENABLEIMGPRO, value ? 0x0E : 0x0A);
+    status |= getCapability(TUIDC_ENABLEIMGPRO, &readback);
+    status |= setIntegerParam(function, readback == 0x0E ? 1 : 0);
+  } else if (function == ADTucam_DataFormat) {
+    status |= setCapability(TUIDC_DATAFORMAT, value);
+    status |= getCapability(TUIDC_DATAFORMAT, &readback);
+    status |= setIntegerParam(function, readback);
+    if (readback == 1) {
+      frameHandle_.ucFormatGet = TUFRM_FMT_RAW;
+      status |= setIntegerParam(ADTucam_FrameFormat, 0);
+    }
+  } else if (function == ADTucam_EnableGamma) {
+    status |= setCapability(TUIDC_ENABLEGAMMA, value);
+    status |= getCapability(TUIDC_ENABLEGAMMA, &readback);
+    status |= setIntegerParam(function, readback);
+  } else if (function == ADTucam_EnableBlackLevel) {
+    status |= setCapability(TUIDC_ENABLEBLACKLEVEL, value);
+    status |= getCapability(TUIDC_ENABLEBLACKLEVEL, &readback);
+    status |= setIntegerParam(function, readback);
+  } else if (function < FIRST_TUCAM_PARAM) {
     status |= setIntegerParam(function, value);
-  } else if (function == ADTucam_TriggerSoftware) {
-    int acquire, triggerMode;
-    getIntegerParam(ADAcquire, &acquire);
-    getIntegerParam(ADTriggerMode, &triggerMode);
-    if (acquire && triggerMode == TUCCM_TRIGGER_SOFTWARE) {
-      tucStatus = TUCAM_Cap_DoSoftwareTrigger(this->camHandle_.hIdxTUCam);
-      if (tucStatus != TUCAMRET_SUCCESS) {
-        ERR_ARGS("Failed to do software trigger (0x%x)", tucStatus);
-        status = asynError;
-      }
-    }
+    status |= ADDriver::writeInt32(pasynUser, value);
   } else {
-    if (function < FIRST_TUCAM_PARAM) {
-      status = ADDriver::writeInt32(pasynUser, value);
-    }
+    status |= setIntegerParam(function, value);
   }
+
   /* Do callbacks so higher layers see any changes */
   callParamCallbacks();
 
-  if (status != asynSuccess) {
-    ERR_ARGS("error, status=%d function=%d, value=%d", status, function, value);
+  nameStatus = this->getParamName(function, &paramName);
+  if (nameStatus == asynSuccess) {
+    if (status != asynSuccess) {
+      ERR_ARGS("error, status=%d, function=%s, value=%d", status, paramName,
+               value);
+    } else {
+      INFO_ARGS("completed, function=%s, value=%d", paramName, value);
+    }
   } else {
-    DEBUG_ARGS("function=%d, value=%d", function, value);
+    if (status != asynSuccess) {
+      ERR_ARGS("error, status=%d, function=%d, value=%d", status, function,
+               value);
+    } else {
+      INFO_ARGS("completed, function=%d, value=%d", function, value);
+    }
   }
 
   return (asynStatus)status;
 }
 
+asynStatus ADTucam::setAcquirePeriod(double period) {
+  static const char *functionName = "setAcquirePeriod";
+  int status = asynSuccess;
+  if (period <= 0) {
+    ERR_ARGS(
+        "Acquire period %f is less than or equal to 0! Setting it to 0.001",
+        period);
+    period = 0.001;
+  }
+  double frequency = 1 / period;
+  status |= setProperty(TUIDP_FRAME_RATE, frequency);
+  status |= getProperty(TUIDP_FRAME_RATE, &frequency);
+  status |= setDoubleParam(ADAcquirePeriod, 1 / frequency);
+  return (asynStatus)status;
+}
+
 /**
  * @brief Override of ADDriver function - performs callbacks on write events to
- * flaot PVs
+ * float PVs
+ *
+ * NOTE: Driver is assumed to be locked when this function is called.
+ *       This happens already when called from asynPortDriver::writeFloat64.
  *
  * @param pasynUser Pointer to record asynUser instance
  * @param value Value written to PV
@@ -725,44 +1162,34 @@ asynStatus ADTucam::writeInt32(asynUser *pasynUser, epicsInt32 value) {
  * @returns asynSuccess if write was successful, asynError otherwise
  */
 asynStatus ADTucam::writeFloat64(asynUser *pasynUser, epicsFloat64 value) {
-  const char *functionName = "writeFloat64";
+  static const char *functionName = "writeFloat64";
   int status = asynSuccess;
   int function = pasynUser->reason;
+  const char *paramName;
+  asynStatus nameStatus;
 
-  /* Set the parameter and readback in the parameter library.  This may be
-   * overwritten when we read back the status at the end, but that's OK */
-  status |= setDoubleParam(function, value);
-
-  double period;
-  getDoubleParam(ADAcquirePeriod, &period);
-  if (function == ADAcquirePeriod) {
-    if (period <= 0) {
-      period = 0.001;
-    }
-    double frequency = 1 / period;
-    INFO_ARGS("Setting frame rate to: %f fps", frequency);
-    TUCAM_Prop_SetValue(this->camHandle_.hIdxTUCam, TUIDP_FRAME_RATE,
-                        frequency);
-    TUCAM_Prop_GetValue(this->camHandle_.hIdxTUCam, TUIDP_FRAME_RATE,
-                        &frequency);
-    setDoubleParam(ADAcquirePeriod, 1 / frequency);
-    INFO_ARGS("Frame rate set to: %f fps", frequency);
+  nameStatus = this->getParamName(function, &paramName);
+  if (nameStatus == asynSuccess) {
+    INFO_ARGS("requested, function=%s, value=%f", paramName, value);
+  } else {
+    INFO_ARGS("requested, function=%d, value=%f", function, value);
   }
-  if (function == ADAcquireTime) {
+
+  if (function == ADAcquirePeriod) {
+    status |= this->setAcquirePeriod(value);
+  } else if (function == ADAcquireTime) {
     // if exposure time is set to something longer than acquire period, change
     // acquire period to be the same
-    double expose_msec;
-
+    double exposureTimeMs;
+    double period;
+    getDoubleParam(ADAcquirePeriod, &period);
     if (value > period) {
-      setDoubleParam(ADAcquirePeriod, value);
+      status |= this->setAcquirePeriod(value);
     }
-    // The factor of 1000 was used in the other IOC
-    expose_msec = value * 1000.0;
-    TUCAM_Prop_SetValue(this->camHandle_.hIdxTUCam, TUIDP_EXPOSURETM,
-                        expose_msec);
-    TUCAM_Prop_GetValue(this->camHandle_.hIdxTUCam, TUIDP_EXPOSURETM,
-                        &expose_msec);
-    setDoubleParam(ADAcquireTime, expose_msec / 1000.0);
+    exposureTimeMs = value * 1000.0;
+    status |= setProperty(TUIDP_EXPOSURETM, exposureTimeMs);
+    status |= getProperty(TUIDP_EXPOSURETM, &exposureTimeMs);
+    status |= setDoubleParam(ADAcquireTime, exposureTimeMs / 1000.0);
   } else if (function == ADTucam_TemperatureSetpoint) {
     // The TUIDP_TEMPERATURE takes a value between 0 and 100 which maps to -50C
     // to 50C The user input is in the range -50C to 50C so we adjust it
@@ -777,90 +1204,154 @@ asynStatus ADTucam::writeFloat64(asynUser *pasynUser, epicsFloat64 value) {
           value, minTemperature, maxTemperature);
       temperature =
           std::min(maxTemperature, std::max(temperature, minTemperature));
-      // Set the corrected value
-      status |= setDoubleParam(ADTucam_TemperatureSetpoint, temperature);
     }
     double rescaledTemperature = temperature + 50;
-    TUCAM_Prop_SetValue(this->camHandle_.hIdxTUCam, TUIDP_TEMPERATURE,
-                        rescaledTemperature);
+    status |= setProperty(TUIDP_TEMPERATURE, rescaledTemperature);
     DEBUG_ARGS("New temperature setpoint detected: degrees=%fC, setting=%f",
                temperature, rescaledTemperature);
-  } else if (function == ADGain) {
-    status |= setProperty(TUIDP_GLOBALGAIN, value);
-    status |= getProperty(TUIDP_GLOBALGAIN, value);
-    if (status) value = 0;
-    status |= setDoubleParam(function, value);
+    status |= setDoubleParam(ADTucam_TemperatureSetpoint, temperature);
   } else if (function == ADTucam_TriggerDelay) {
-    status |= this->setCameraTrigger();
+    int triggerMode, triggerEdge, triggerExposure;
+    getIntegerParam(ADTriggerMode, &triggerMode);
+    getIntegerParam(ADTucam_TriggerEdge, &triggerEdge);
+    getIntegerParam(ADTucam_TriggerExposure, &triggerExposure);
+    status |= this->setCameraTrigger(triggerMode, triggerEdge, triggerExposure,
+                                     value);
     status |= this->setCurrentTrigger();
-  } else if (function == ADTucam_TriggerOut1Delay ||
-             function == ADTucam_TriggerOut1Width) {
-    if (triggerOutSupport_) {
-      status |= this->setCameraTriggerOut(0);
+  } else if (function == ADTucam_TriggerOut1Delay) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut1Mode, triggerOut1Edge;
+      double triggerOut1Width;
+      getIntegerParam(ADTucam_TriggerOut1Mode, &triggerOut1Mode);
+      getIntegerParam(ADTucam_TriggerOut1Edge, &triggerOut1Edge);
+      getDoubleParam(ADTucam_TriggerOut1Width, &triggerOut1Width);
+      status |= this->setCameraTriggerOut(0, triggerOut1Mode, triggerOut1Edge,
+                                          value, triggerOut1Width);
       status |= this->setCurrentTriggerOut(0);
     } else {
-      status |= setDoubleParam(function, 0);
+      status |= setStringParam(ADStatusMessage, "Trigger out 1 not supported");
+      status |= asynError;
     }
-  } else if (function == ADTucam_TriggerOut2Delay ||
-             function == ADTucam_TriggerOut2Width) {
-    if (triggerOutSupport_) {
-      status |= this->setCameraTriggerOut(1);
+  } else if (function == ADTucam_TriggerOut1Width) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut1Mode, triggerOut1Edge;
+      double triggerOut1Delay;
+      getIntegerParam(ADTucam_TriggerOut1Mode, &triggerOut1Mode);
+      getIntegerParam(ADTucam_TriggerOut1Edge, &triggerOut1Edge);
+      getDoubleParam(ADTucam_TriggerOut1Delay, &triggerOut1Delay);
+      status |= this->setCameraTriggerOut(0, triggerOut1Mode, triggerOut1Edge,
+                                          triggerOut1Delay, value);
+      status |= this->setCurrentTriggerOut(0);
+    } else {
+      status |= setStringParam(ADStatusMessage, "Trigger out 1 not supported");
+      status |= asynError;
+    }
+  } else if (function == ADTucam_TriggerOut2Delay) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut2Mode, triggerOut2Edge;
+      double triggerOut2Width;
+      getIntegerParam(ADTucam_TriggerOut2Mode, &triggerOut2Mode);
+      getIntegerParam(ADTucam_TriggerOut2Edge, &triggerOut2Edge);
+      getDoubleParam(ADTucam_TriggerOut2Width, &triggerOut2Width);
+      status |= this->setCameraTriggerOut(1, triggerOut2Mode, triggerOut2Edge,
+                                          value, triggerOut2Width);
       status |= this->setCurrentTriggerOut(1);
     } else {
-      status |= setDoubleParam(function, 0);
+      status |= setStringParam(ADStatusMessage, "Trigger out 2 not supported");
+      status |= asynError;
     }
-  } else if (function == ADTucam_TriggerOut3Delay ||
-             function == ADTucam_TriggerOut3Width) {
-    if (triggerOutSupport_) {
-      status |= this->setCameraTriggerOut(2);
+  } else if (function == ADTucam_TriggerOut2Width) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut2Mode, triggerOut2Edge;
+      double triggerOut2Delay;
+      getIntegerParam(ADTucam_TriggerOut2Mode, &triggerOut2Mode);
+      getIntegerParam(ADTucam_TriggerOut2Edge, &triggerOut2Edge);
+      getDoubleParam(ADTucam_TriggerOut2Delay, &triggerOut2Delay);
+      status |= this->setCameraTriggerOut(1, triggerOut2Mode, triggerOut2Edge,
+                                          triggerOut2Delay, value);
+      status |= this->setCurrentTriggerOut(1);
+    } else {
+      status |= setStringParam(ADStatusMessage, "Trigger out 2 not supported");
+      status |= asynError;
+    }
+  } else if (function == ADTucam_TriggerOut3Delay) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut3Mode, triggerOut3Edge;
+      double triggerOut3Width;
+      getIntegerParam(ADTucam_TriggerOut3Mode, &triggerOut3Mode);
+      getIntegerParam(ADTucam_TriggerOut3Edge, &triggerOut3Edge);
+      getDoubleParam(ADTucam_TriggerOut3Width, &triggerOut3Width);
+      status |= this->setCameraTriggerOut(2, triggerOut3Mode, triggerOut3Edge,
+                                          value, triggerOut3Width);
       status |= this->setCurrentTriggerOut(2);
     } else {
-      status = setDoubleParam(function, 0);
+      status |= setStringParam(ADStatusMessage, "Trigger out 3 not supported");
+      status |= asynError;
     }
+  } else if (function == ADTucam_TriggerOut3Width) {
+    if (triggerOutSupport_ == 1) {
+      int triggerOut3Mode, triggerOut3Edge;
+      double triggerOut3Delay;
+      getIntegerParam(ADTucam_TriggerOut3Mode, &triggerOut3Mode);
+      getIntegerParam(ADTucam_TriggerOut3Edge, &triggerOut3Edge);
+      getDoubleParam(ADTucam_TriggerOut3Delay, &triggerOut3Delay);
+      status |= this->setCameraTriggerOut(2, triggerOut3Mode, triggerOut3Edge,
+                                          triggerOut3Delay, value);
+      status |= this->setCurrentTriggerOut(2);
+    } else {
+      status |= setStringParam(ADStatusMessage, "Trigger out 3 not supported");
+      status |= asynError;
+    }
+  } else if (function == ADGain) {
+    status |= setProperty(TUIDP_GLOBALGAIN, value);
+    status |= getProperty(TUIDP_GLOBALGAIN, &value);
+    if (status) value = 0;
+    status |= setDoubleParam(function, value);
   } else if (function == ADTucam_Brightness) {
-    status = setProperty(TUIDP_BRIGHTNESS, value);
-    status = getProperty(TUIDP_BRIGHTNESS, value);
-    status = setDoubleParam(function, value);
+    status |= setProperty(TUIDP_BRIGHTNESS, value);
+    status |= getProperty(TUIDP_BRIGHTNESS, &value);
+    if (status) value = 0;
+    status |= setDoubleParam(function, value);
   } else if (function == ADTucam_BlackLevel) {
-    status = setProperty(TUIDP_BLACKLEVEL, value);
-    status = getProperty(TUIDP_BLACKLEVEL, value);
+    status |= setProperty(TUIDP_BLACKLEVEL, value);
+    status |= getProperty(TUIDP_BLACKLEVEL, &value);
     if (status) value = 0;
-    status = setDoubleParam(function, value);
+    status |= setDoubleParam(function, value);
   } else if (function == ADTucam_Sharpness) {
-    status = setProperty(TUIDP_SHARPNESS, value);
-    status = getProperty(TUIDP_SHARPNESS, value);
+    status |= setProperty(TUIDP_SHARPNESS, value);
+    status |= getProperty(TUIDP_SHARPNESS, &value);
     if (status) value = 0;
-    status = setDoubleParam(function, value);
+    status |= setDoubleParam(function, value);
   } else if (function == ADTucam_NoiseLevel) {
-    status = setProperty(TUIDP_NOISELEVEL, value);
-    status = getProperty(TUIDP_NOISELEVEL, value);
+    status |= setProperty(TUIDP_NOISELEVEL, value);
+    status |= getProperty(TUIDP_NOISELEVEL, &value);
     if (status) value = 0;
-    status = setDoubleParam(function, value);
+    status |= setDoubleParam(function, value);
   } else if (function == ADTucam_HDRK) {
-    status = setProperty(TUIDP_HDR_KVALUE, value);
-    status = getProperty(TUIDP_HDR_KVALUE, value);
+    status |= setProperty(TUIDP_HDR_KVALUE, value);
+    status |= getProperty(TUIDP_HDR_KVALUE, &value);
     if (status) value = 0;
-    status = setDoubleParam(function, value);
+    status |= setDoubleParam(function, value);
   } else if (function == ADTucam_Gamma) {
-    status = setProperty(TUIDP_GAMMA, value);
-    status = getProperty(TUIDP_GAMMA, value);
+    status |= setProperty(TUIDP_GAMMA, value);
+    status |= getProperty(TUIDP_GAMMA, &value);
     if (status) value = 0;
-    status = setDoubleParam(function, value);
+    status |= setDoubleParam(function, value);
   } else if (function == ADTucam_Contrast) {
-    status = setProperty(TUIDP_CONTRAST, value);
-    status = getProperty(TUIDP_CONTRAST, value);
+    status |= setProperty(TUIDP_CONTRAST, value);
+    status |= getProperty(TUIDP_CONTRAST, &value);
     if (status) value = 0;
-    status = setDoubleParam(function, value);
+    status |= setDoubleParam(function, value);
   } else if (function == ADTucam_LeftLevel) {
-    status = setProperty(TUIDP_LFTLEVELS, value);
-    status = getProperty(TUIDP_LFTLEVELS, value);
+    status |= setProperty(TUIDP_LFTLEVELS, value);
+    status |= getProperty(TUIDP_LFTLEVELS, &value);
     if (status) value = 0;
-    status = setDoubleParam(function, value);
+    status |= setDoubleParam(function, value);
   } else if (function == ADTucam_RightLevel) {
-    status = setProperty(TUIDP_RGTLEVELS, value);
-    status = getProperty(TUIDP_RGTLEVELS, value);
+    status |= setProperty(TUIDP_RGTLEVELS, value);
+    status |= getProperty(TUIDP_RGTLEVELS, &value);
     if (status) value = 0;
-    status = setDoubleParam(function, value);
+    status |= setDoubleParam(function, value);
   } else if (function == ADTucam_AutoTECThreshold) {
     // Dangerous to have auto TEC threshold above 40 degrees
     if (value >= 40.0) {
@@ -868,21 +1359,36 @@ asynStatus ADTucam::writeFloat64(asynUser *pasynUser, epicsFloat64 value) {
           "Requested TEC threshold %f is above 40 degrees! Setting it to "
           "40 degrees...",
           value);
-      setDoubleParam(ADTucam_AutoTECThreshold, 40.0);
+      status |= setDoubleParam(ADTucam_AutoTECThreshold, 40.0);
+      status |= asynError;
+    } else {
+      status |= setDoubleParam(ADTucam_AutoTECThreshold, value);
     }
+  } else if (function < FIRST_TUCAM_PARAM) {
+    status |= setDoubleParam(function, value);
+    status |= ADDriver::writeFloat64(pasynUser, value);
   } else {
-    if (function < FIRST_TUCAM_PARAM) {
-      status = ADDriver::writeFloat64(pasynUser, value);
-    }
+    status |= setDoubleParam(function, value);
   }
 
   /* Do callbacks so higher layers see any changes */
   callParamCallbacks();
 
-  if (status) {
-    ERR_ARGS("error, status=%d function=%d, value=%f", status, function, value);
+  nameStatus = this->getParamName(function, &paramName);
+  if (nameStatus == asynSuccess) {
+    if (status != asynSuccess) {
+      ERR_ARGS("error, status=%d, function=%s, value=%f", status, paramName,
+               value);
+    } else {
+      INFO_ARGS("completed, function=%s, value=%f", paramName, value);
+    }
   } else {
-    DEBUG_ARGS("function=%d, value=%f", function, value);
+    if (status != asynSuccess) {
+      ERR_ARGS("error, status=%d, function=%d, value=%f", status, function,
+               value);
+    } else {
+      INFO_ARGS("completed,function=%d, value=%f", function, value);
+    }
   }
 
   return (asynStatus)status;
@@ -894,14 +1400,14 @@ asynStatus ADTucam::writeFloat64(asynUser *pasynUser, epicsFloat64 value) {
  *
  * We assume that the driver is locked when this function is called.
  *
- * @param msStartTime Time in milliseconds when the acquisition started
+ * @param startTimeStamp EPICS time when the acquisition started
  *
  * @returns asynSuccess if image was successfully grabbed, asynError otherwise
  */
-asynStatus ADTucam::grabImage(double msStartTime) {
+asynStatus ADTucam::grabImage(epicsTimeStamp *startTimeStamp) {
   static const char *functionName = "grabImage";
-  asynStatus status = asynSuccess;
-  int tucStatus;
+  int status = asynSuccess;
+  TUCAMRET tucStatus;
   int nCols, nRows;
   int pixelFormat, channels, pixelBytes;
   size_t dataSize, tDataSize;
@@ -911,25 +1417,42 @@ asynStatus ADTucam::grabImage(double msStartTime) {
   int pixelSize = 2;
   size_t dims[3] = {0};
   int nDims;
-  int count;
-  double exposureTimeout, exposureTime, acquirePeriod;
+  int triggerMode;
+  double timeout, acquireTime, acquirePeriod;
   TUCAM_IMG_HEADER frameHeader;
 
-  getDoubleParam(ADAcquireTime, &exposureTime);
+  /* If the trigger mode is software, we need to issue a software trigger
+   * to start exposing the next frame */
+  getIntegerParam(ADTriggerMode, &triggerMode);
+  if (triggerMode == TUCCM_TRIGGER_SOFTWARE) {
+    INFO("Issuing software trigger to start exposure");
+    tucStatus = sdkHandler_->doSoftwareTrigger(this->camHandle_.hIdxTUCam);
+    if (tucStatus != TUCAMRET_SUCCESS) {
+      ERR("Failed to issue software trigger");
+      return asynError;
+    }
+  }
+
+  getDoubleParam(ADAcquireTime, &acquireTime);
   getDoubleParam(ADAcquirePeriod, &acquirePeriod);
 
-  exposureTimeout = (exposureTime + acquirePeriod) * 1000 + 2000;
+  /* Convert to ms and add a 2s buffer */
+  timeout = (acquireTime + acquirePeriod) * 1000 + 2000;
 
-  INFO("Waiting for frame...");
+  INFO_ARGS("Waiting for frame... timeout=%f ms", timeout);
   this->unlock();
-  tucStatus = TUCAM_Buf_WaitForFrame(camHandle_.hIdxTUCam, &frameHandle_,
-                                     exposureTimeout);
+  epicsEventSignal(this->startFrameTimeoutEventId_);
+  // NOTE: Extremely unlikely race condition here if the timeout thread finishes
+  // before waiting for the frame. Unfortunately, this is the best we can do.
+  tucStatus =
+      sdkHandler_->waitForFrame(camHandle_.hIdxTUCam, &frameHandle_, timeout);
+  epicsEventSignal(this->stopFrameTimeoutEventId_);
   this->lock();
   if (tucStatus == TUCAMRET_ABORT) {
-    INFO_ARGS("acquisition aborted by user (0x%x)", tucStatus);
+    INFO_ARGS("Acquisition aborted, tucStatus=(0x%x)", tucStatus);
     return asynError;
   } else if (tucStatus != TUCAMRET_SUCCESS) {
-    ERR_ARGS("failed to wait for frame (0x%x)", tucStatus);
+    ERR_ARGS("Failed to wait for frame, tucStatus=(0x%x)", tucStatus);
     return asynError;
   }
 
@@ -984,6 +1507,7 @@ asynStatus ADTucam::grabImage(double msStartTime) {
     ERR_ARGS("Unsupported pixel format %d", pixelFormat);
     return asynError;
   }
+
   if (numColors == 1) {
     nDims = 2;
     dims[0] = nCols;
@@ -1004,44 +1528,41 @@ asynStatus ADTucam::grabImage(double msStartTime) {
     return asynError;
   }
 
-  setIntegerParam(NDArraySizeX, nCols);
-  setIntegerParam(NDArraySizeY, nRows);
-  setIntegerParam(NDArraySize, static_cast<int>(dataSize));
-  setIntegerParam(NDDataType, dataType);
-  setIntegerParam(NDColorMode, colorMode);
+  status |= setIntegerParam(NDArraySizeX, nCols);
+  status |= setIntegerParam(NDArraySizeY, nRows);
+  status |= setIntegerParam(NDArraySize, static_cast<int>(dataSize));
+  status |= setIntegerParam(NDDataType, dataType);
+  status |= setIntegerParam(NDColorMode, colorMode);
+  if (status != asynSuccess) {
+    ERR("Failed to set NDArray parameters");
+  }
 
   // Copy frame to an NDArray buffer
-  pRaw_ = pNDArrayPool->alloc(nDims, dims, dataType, 0, NULL);
-  if (!pRaw_) {
+  this->pRaw_ = this->pNDArrayPool->alloc(nDims, dims, dataType, 0, NULL);
+  if (!this->pRaw_) {
     ERR_ARGS(
         "[%s] Serious problem: not enough buffers left. Aborting acquisition!",
         portName);
     return asynError;
   }
-  memcpy(pRaw_->pData, this->frameHandle_.pBuffer + this->frameHandle_.usOffset,
-         dataSize);
-  getIntegerParam(NDArrayCounter, &count);
-  pRaw_->uniqueId = count;
-  updateTimeStamp(&pRaw_->epicsTS);
-
+  memcpy(this->pRaw_->pData,
+         this->frameHandle_.pBuffer + this->frameHandle_.usOffset, dataSize);
   // Copy the header data from the frame
   // `frameHeader.dblTimeStamp` is in ms since the TUCAM_Cap_Start (it is the
   // acquire/exposure start time) `frameHeader.dblTimeLast` is in ms since the
   // frameHeader.dblTimeStamp (it is the acquire end time, NOT the exposure end
   // time) Precision is to nanoseconds
   memcpy(&frameHeader, this->frameHandle_.pBuffer, sizeof(TUCAM_IMG_HEADER));
-  DEBUG_ARGS("Tucam timestamp start: %f ms", frameHeader.dblTimeStamp);
-  DEBUG_ARGS("Tucam timestamp end: %f ms", frameHeader.dblTimeLast);
-  double timeStamp = (msStartTime + frameHeader.dblTimeStamp) * 1.e-3;
-  DEBUG_ARGS("Tucam timestamp FINAL: %f s", timeStamp);
-  pRaw_->timeStamp = timeStamp;
+  double timeStamp =
+      startTimeStamp->secPastEpoch + (frameHeader.dblTimeStamp * 1.e-3);
+  this->pRaw_->timeStamp = timeStamp;
+  this->getAttributes(this->pRaw_->pAttributeList);
+  this->pRaw_->pAttributeList->add("ColorMode", "Color mode", NDAttrInt32,
+                                   &colorMode);
 
-  getAttributes(pRaw_->pAttributeList);
+  INFO_ARGS("Grabbed image at %f s", timeStamp);
 
-  pRaw_->pAttributeList->add("ColorMode", "Color mode", NDAttrInt32,
-                             &colorMode);
-
-  return status;
+  return (asynStatus)status;
 }
 
 /**
@@ -1055,79 +1576,46 @@ asynStatus ADTucam::grabImage(double msStartTime) {
  */
 asynStatus ADTucam::startCapture() {
   static const char *functionName = "startCapture";
-  int status = asynSuccess;
   int tucStatus;
   int triggerMode;
 
-  tucStatus = TUCAM_Buf_Alloc(this->camHandle_.hIdxTUCam, &this->frameHandle_);
-  if (tucStatus != TUCAMRET_SUCCESS) {
-    ERR_ARGS("Failed to allocate buffer, status=%d", tucStatus);
-    setIntegerParam(ADAcquire, 0);
-    setIntegerParam(ADStatus, ADStatusError);
-    setStringParam(ADStatusMessage,
-                   "Failed to allocate buffer to start acquisition");
-    callParamCallbacks();
-    return asynError;
-  }
-
   getIntegerParam(ADTriggerMode, &triggerMode);
-  tucStatus = TUCAM_Cap_Start(this->camHandle_.hIdxTUCam, triggerMode);
+  tucStatus =
+      sdkHandler_->startCapture(this->camHandle_.hIdxTUCam, triggerMode);
   if (tucStatus != TUCAMRET_SUCCESS) {
-    ERR_ARGS("Failed to start acquisition, status=%d", tucStatus);
-    setIntegerParam(ADAcquire, 0);
-    setIntegerParam(ADStatus, ADStatusError);
-    setStringParam(ADStatusMessage, "Failed to start acquisition");
-    callParamCallbacks();
+    ERR_ARGS("Failed to start acquisition, tucStatus=(0x%x)", tucStatus);
     return asynError;
   }
 
-  status |= setIntegerParam(ADStatus, ADStatusAcquire);
-  status |= setStringParam(ADStatusMessage, "Acquiring...");
-  INFO("Acquisition started.");
-  status |= setIntegerParam(ADNumImagesCounter, 0);
-  status |= setIntegerParam(ADAcquire, 1);
-  this->acquisitionActive = true;
+  INFO_ARGS("Capturing... triggerMode=%d", triggerMode);
 
-  return (asynStatus)status;
+  return asynSuccess;
 }
 
 /**
  * @brief Aborts & stops acquisition and releases camera buffer.
  *
- * @param acquireStatus Status to set the ADStatus PV to
- *
  * @returns asynSuccess if acquisition was successfully stopped, asynError
  * otherwise
  */
-asynStatus ADTucam::stopCapture(int acquireStatus) {
+asynStatus ADTucam::stopCapture() {
   static const char *functionName = "stopCapture";
   int status = asynSuccess;
   int tucStatus;
 
-  if (this->acquisitionActive) {
-    this->acquisitionActive = false;
-    this->unlock();
-    tucStatus = TUCAM_Buf_AbortWait(camHandle_.hIdxTUCam);
-    if (tucStatus != TUCAMRET_SUCCESS) {
-      ERR_ARGS("unable to abort wait (%d)", tucStatus);
-    }
-
-    tucStatus = TUCAM_Cap_Stop(camHandle_.hIdxTUCam);
-    if (tucStatus != TUCAMRET_SUCCESS) {
-      ERR_ARGS("unable to stop acquisition (%d)", tucStatus);
-    }
-
-    tucStatus = TUCAM_Buf_Release(camHandle_.hIdxTUCam);
-    if (tucStatus != TUCAMRET_SUCCESS) {
-      ERR_ARGS("unable to release camera buffer (%d)", tucStatus);
-    }
-
-    this->lock();
-    status = setIntegerParam(ADStatus, acquireStatus);
-    status = setIntegerParam(ADAcquire, 0);
-  } else {
-    WARN("Acquisition not active!");
+  tucStatus = sdkHandler_->abortWait(camHandle_.hIdxTUCam);
+  if (tucStatus != TUCAMRET_SUCCESS) {
+    ERR_ARGS("unable to abort wait for frame, tucStatus=(0x%x)", tucStatus);
+    status |= asynError;
   }
+
+  tucStatus = sdkHandler_->stopCapture(camHandle_.hIdxTUCam);
+  if (tucStatus != TUCAMRET_SUCCESS) {
+    ERR_ARGS("unable to stop capturing, tucStatus=(0x%x)", tucStatus);
+    status |= asynError;
+  }
+
+  INFO("Capture stopped");
 
   return (asynStatus)status;
 }
@@ -1138,43 +1626,38 @@ asynStatus ADTucam::stopCapture(int acquireStatus) {
  * @returns asynSuccess if acquisition thread was successfully started,
  * asynError otherwise
  */
-asynStatus ADTucam::startAcquisitionThread() {
-  static const char *functionName = "startAcquisitionThread";
+asynStatus ADTucam::startAcquisition() {
+  static const char *functionName = "startAcquisition";
   int status = asynSuccess;
 
-  epicsEventSignal(startEventId_);
-  epicsThreadOpts opts;
-  opts.priority = epicsThreadPriorityHigh;
-  opts.stackSize = epicsThreadGetStackSize(epicsThreadStackBig);
-  opts.joinable = 1;
-  INFO("Spawning main acquisition thread...");
-  this->acquisitionThreadId =
-      epicsThreadCreateOpt("ADTucamAcquisitionThread",
-                           (EPICSTHREADFUNC)acquisitionThreadC, this, &opts);
-  this->acquisitionActive = true;
-  callParamCallbacks();
+  epicsEventSignal(this->startEventId_);
 
+  INFO("Acquisition start event signaled");
   return (asynStatus)status;
 }
 
 /**
  * @brief Stops acquisition thread.
  *
- * @param acquireStatus Status to set the ADStatus PV to
- *
  * @returns asynSuccess if acquisition thread was successfully stopped,
  * asynError otherwise
  */
-asynStatus ADTucam::stopAcquisitionThread(int acquireStatus) {
-  static const char *functionName = "stopAcquisitionThread";
+asynStatus ADTucam::stopAcquisition() {
+  static const char *functionName = "stopAcquisition";
   int status = asynSuccess;
   int tucStatus;
 
-  this->stopCapture(acquireStatus);
-  INFO("Waiting for acquisition thread to join...");
-  epicsThreadMustJoin(this->acquisitionThreadId);
-  INFO("Acquisition stopped.");
-  callParamCallbacks();
+  /* Signal a forced stop */
+  epicsEventSignal(this->stopEventId_);
+
+  /* Abort the current frame */
+  tucStatus = sdkHandler_->abortWait(this->camHandle_.hIdxTUCam);
+  if (tucStatus != TUCAMRET_SUCCESS) {
+    ERR_ARGS("unable to abort wait for frame, tucStatus=(0x%x)", tucStatus);
+    status |= asynError;
+  }
+
+  INFO("Acquisition stop event signaled");
 
   return (asynStatus)status;
 }
@@ -1196,29 +1679,33 @@ asynStatus ADTucam::connectCamera() {
   apiHandle_.pstrConfigPath = szPath;
   apiHandle_.uiCamCount = 0;
 
-  tucStatus = TUCAM_Api_Init(&apiHandle_);
+  INFO("Initializing TUCAM API");
+  tucStatus = sdkHandler_->initializeAPI(&apiHandle_);
   if (tucStatus != TUCAMRET_SUCCESS) {
-    ERR_ARGS("TUCAM API init failed (0x%x)", tucStatus);
+    ERR_ARGS("TUCAM API init failed, tucStatus=(0x%x)", tucStatus);
     return asynError;
   }
-  if (apiHandle_.uiCamCount < 1) {
-    ERR_ARGS("no camera detected (0x%x)", tucStatus);
-    return asynError;
-  }
-
   TUCAMInitialized++;
+  if (apiHandle_.uiCamCount < 1) {
+    ERR_ARGS("No camera detected, tucStatus=(0x%x)", tucStatus);
+    sdkHandler_->uninitializeAPI();
+    return asynError;
+  }
 
   // Init camera
   camHandle_.hIdxTUCam = NULL;
   camHandle_.uiIdxOpen = cameraId_;
 
-  tucStatus = TUCAM_Dev_Open(&camHandle_);
+  INFO_ARGS("Opening camera device... cameraId_=%d", cameraId_);
+  tucStatus = sdkHandler_->openDevice(&camHandle_);
   if (tucStatus != TUCAMRET_SUCCESS) {
-    ERR_ARGS("open camera device failed (0x%x)", tucStatus);
+    ERR_ARGS("Failed to open camera device, tucStatus=(0x%x)", tucStatus);
+    sdkHandler_->uninitializeAPI();
     return asynError;
   }
 
   // Set PVs from camera information
+  INFO("Setting PVs from camera information");
   status |= setCamInfo(ADModel, TUIDI_CAMERA_MODEL, 0);
   status |= setCamInfo(ADFirmwareVersion, TUIDI_VERSION_FRMW, 0);
   status |= setCamInfo(ADSDKVersion, TUIDI_VERSION_API, 0);
@@ -1232,16 +1719,31 @@ asynStatus ADTucam::connectCamera() {
   triggerOutSupport_ = 1;
   for (int port = 0; port < 3; port++) {
     if (this->setCurrentTriggerOut(port) != asynSuccess) {
+      WARN_ARGS("Trigger out %d not supported", port);
       triggerOutSupport_ = 0;
       break;
     }
   }
 
+  INFO("Allocating initial frame buffer");
+  /* Allocate initial frame buffer (need to re-allocate if resolution changes)
+   */
+  this->frameHandle_.uiRsdSize = 1;
+  tucStatus = sdkHandler_->allocateBuffer(this->camHandle_.hIdxTUCam,
+                                          &this->frameHandle_);
+  if (tucStatus != TUCAMRET_SUCCESS) {
+    ERR_ARGS("Failed to allocate buffer, tucStatus=(0x%x)", tucStatus);
+    sdkHandler_->closeDevice(this->camHandle_.hIdxTUCam);
+    sdkHandler_->uninitializeAPI();
+    return asynError;
+  }
+
+  INFO("Camera connected");
   return (asynStatus)status;
 }
 
 /**
- * @brief Disconnect from the camera.
+ * @brief Disconnect from the camera. Assumes that the driver is not acquiring.
  *
  * @returns asynSuccess if camera was successfully disconnected, asynError
  * otherwise
@@ -1249,19 +1751,42 @@ asynStatus ADTucam::connectCamera() {
 asynStatus ADTucam::disconnectCamera(void) {
   static const char *functionName = "disconnectCamera";
   int tucStatus;
-  int acquiring;
-  int status;
+  int status = asynSuccess;
+  int capturing;
 
-  // Stop acquiring, if active
-  if (this->acquisitionActive) {
-    status = this->stopCapture(ADStatusIdle);
+  /* If we have a camera open, stop it and close it */
+  if (this->camHandle_.hIdxTUCam != NULL) {
+    getIntegerParam(ADTucam_Capture, &capturing);
+    if (capturing) {
+      INFO("Capture is still active, stopping it");
+      this->stopCapture();
+      setIntegerParam(ADTucam_Capture, 0);
+    }
+
+    INFO("Releasing camera buffer");
+    tucStatus = sdkHandler_->releaseBuffer(camHandle_.hIdxTUCam);
+    if (tucStatus != TUCAMRET_SUCCESS) {
+      status = asynError;
+      ERR_ARGS("Unable to release camera buffer, tucStatus=(0x%x)", tucStatus);
+    }
+
+    INFO("Closing camera device");
+    tucStatus = sdkHandler_->closeDevice(camHandle_.hIdxTUCam);
+    if (tucStatus != TUCAMRET_SUCCESS) {
+      status = asynError;
+      ERR_ARGS("Unable close camera, tucStatus=(0x%x)\n", tucStatus);
+    }
   }
 
-  tucStatus = TUCAM_Dev_Close(camHandle_.hIdxTUCam);
-  if (tucStatus != TUCAMRET_SUCCESS) {
-    status = asynError;
-    ERR_ARGS("unable close camera (0x%x)\n", tucStatus);
+  /* If that was the last camera, uninitialize the SDK */
+  TUCAMInitialized--;
+  if (TUCAMInitialized == 0) {
+    INFO("Uninitializing TUCAM API");
+    sdkHandler_->uninitializeAPI();
   }
+
+  INFO("Camera disconnected");
+
   return (asynStatus)status;
 }
 
@@ -1276,7 +1801,7 @@ asynStatus ADTucam::setCurrentTrigger() {
   int status = asynSuccess;
   int tucStatus;
 
-  tucStatus = TUCAM_Cap_GetTrigger(camHandle_.hIdxTUCam, &triggerHandle_);
+  tucStatus = sdkHandler_->getTrigger(camHandle_.hIdxTUCam, &triggerHandle_);
   if (tucStatus != TUCAMRET_SUCCESS) {
     ERR_ARGS("Failed to get trigger, status=%d", tucStatus);
     return asynError;
@@ -1294,20 +1819,19 @@ asynStatus ADTucam::setCurrentTrigger() {
 /**
  * @brief Read EPICS PVs to set the camera's trigger mode.
  *
+ * @param triggerMode Trigger mode to set
+ * @param triggerEdge Trigger edge to set
+ * @param triggerExposure Trigger exposure to set
+ * @param triggerDelay Trigger delay to set
+ *
  * @returns asynSuccess if trigger mode was successfully set, asynError
  * otherwise
  */
-asynStatus ADTucam::setCameraTrigger() {
+asynStatus ADTucam::setCameraTrigger(int triggerMode, int triggerEdge,
+                                     int triggerExposure, double triggerDelay) {
   static const char *functionName = "setCameraTrigger";
   int status = asynSuccess;
   int tucStatus;
-  int triggerMode, triggerEdge, triggerExposure;
-  double triggerDelay;
-
-  getIntegerParam(ADTriggerMode, &triggerMode);
-  getIntegerParam(ADTucam_TriggerEdge, &triggerEdge);
-  getIntegerParam(ADTucam_TriggerExposure, &triggerExposure);
-  getDoubleParam(ADTucam_TriggerDelay, &triggerDelay);
 
   frameHandle_.uiRsdSize = 1;
 
@@ -1317,7 +1841,11 @@ asynStatus ADTucam::setCameraTrigger() {
   triggerHandle_.nFrames = 1;
   triggerHandle_.nDelayTm = static_cast<int>(triggerDelay * 1e6);
 
-  tucStatus = TUCAM_Cap_SetTrigger(camHandle_.hIdxTUCam, triggerHandle_);
+  INFO_ARGS(
+      "Setting trigger... triggerMode=%d, triggerEdge=%d, triggerExposure=%d, "
+      "triggerDelay=%f",
+      triggerMode, triggerEdge, triggerExposure, triggerDelay);
+  tucStatus = sdkHandler_->setTrigger(camHandle_.hIdxTUCam, triggerHandle_);
   if (tucStatus != TUCAMRET_SUCCESS) {
     ERR_ARGS("Failed to set trigger, status=%d", tucStatus);
     return asynError;
@@ -1339,8 +1867,8 @@ asynStatus ADTucam::setCurrentTriggerOut(int port) {
   int status = asynSuccess;
   int tucStatus;
 
-  tucStatus =
-      TUCAM_Cap_GetTriggerOut(camHandle_.hIdxTUCam, &triggerOutHandle_[port]);
+  tucStatus = sdkHandler_->getTriggerOut(camHandle_.hIdxTUCam,
+                                         &triggerOutHandle_[port]);
   if (tucStatus != TUCAMRET_SUCCESS) {
     ERR_ARGS("Failed to get trigger out, port=%d, status=%d\n", port,
              tucStatus);
@@ -1383,34 +1911,25 @@ asynStatus ADTucam::setCurrentTriggerOut(int port) {
  * @brief Read EPICS PVs to set the camera's trigger out settings.
  *
  * @param port Trigger out port to set
+ * @param triggerMode Trigger mode to set
+ * @param triggerEdge Trigger edge to set
+ * @param triggerDelay Trigger delay to set
+ * @param triggerWidth Trigger width to set
  *
  * @returns asynSuccess if trigger out settings were successfully set, asynError
  * otherwise
  */
-asynStatus ADTucam::setCameraTriggerOut(int port) {
+asynStatus ADTucam::setCameraTriggerOut(int port, int triggerMode,
+                                        int triggerEdge, double triggerDelay,
+                                        double triggerWidth) {
   static const char *functionName = "setCameraTriggerOut";
   int status = asynSuccess;
   int tucStatus;
-  int triggerMode, triggerEdge;
-  double triggerDelay, triggerWidth;
 
-  if (port == 0) {
-    getIntegerParam(ADTucam_TriggerOut1Mode, &triggerMode);
-    getIntegerParam(ADTucam_TriggerOut1Edge, &triggerEdge);
-    getDoubleParam(ADTucam_TriggerOut1Delay, &triggerDelay);
-    getDoubleParam(ADTucam_TriggerOut1Width, &triggerWidth);
-  } else if (port == 1) {
-    getIntegerParam(ADTucam_TriggerOut2Mode, &triggerMode);
-    getIntegerParam(ADTucam_TriggerOut2Edge, &triggerEdge);
-    getDoubleParam(ADTucam_TriggerOut2Delay, &triggerDelay);
-    getDoubleParam(ADTucam_TriggerOut2Width, &triggerWidth);
-  } else if (port == 2) {
-    getIntegerParam(ADTucam_TriggerOut3Mode, &triggerMode);
-    getIntegerParam(ADTucam_TriggerOut3Edge, &triggerEdge);
-    getDoubleParam(ADTucam_TriggerOut3Delay, &triggerDelay);
-    getDoubleParam(ADTucam_TriggerOut3Width, &triggerWidth);
-  }
-
+  INFO_ARGS(
+      "Setting trigger out... port=%d, triggerMode=%d, triggerEdge=%d, "
+      "triggerDelay=%f, triggerWidth=%f",
+      port, triggerMode, triggerEdge, triggerDelay, triggerWidth);
   triggerOutHandle_[port].nTgrOutPort = port;
   triggerOutHandle_[port].nTgrOutMode = triggerMode;
   triggerOutHandle_[port].nEdgeMode = triggerEdge;
@@ -1418,7 +1937,7 @@ asynStatus ADTucam::setCameraTriggerOut(int port) {
   triggerOutHandle_[port].nWidth = static_cast<int>(triggerWidth * 1e6);
 
   tucStatus =
-      TUCAM_Cap_SetTriggerOut(camHandle_.hIdxTUCam, triggerOutHandle_[port]);
+      sdkHandler_->setTriggerOut(camHandle_.hIdxTUCam, triggerOutHandle_[port]);
   if (tucStatus != TUCAMRET_SUCCESS) {
     ERR_ARGS("Failed to set trigger out, port=%d, status=%d\n", port,
              tucStatus);
@@ -1442,9 +1961,9 @@ asynStatus ADTucam::setCurrentROI() {
   getIntegerParam(ADMaxSizeY, &maxSizeY);
 
   TUCAM_ROI_ATTR roiAttr;
-  tucStatus = TUCAM_Cap_GetROI(camHandle_.hIdxTUCam, &roiAttr);
+  tucStatus = sdkHandler_->getROI(camHandle_.hIdxTUCam, &roiAttr);
   if (tucStatus != TUCAMRET_SUCCESS) {
-    ERR_ARGS("failed to get ROI, status=%d", tucStatus);
+    ERR_ARGS("Failed to get ROI, tucStatus=(0x%x)", tucStatus);
     return asynError;
   }
 
@@ -1460,10 +1979,10 @@ asynStatus ADTucam::setCurrentROI() {
     sizeY = maxSizeY;
   }
 
-  status = setIntegerParam(ADMinX, minX);
-  status = setIntegerParam(ADMinY, minY);
-  status = setIntegerParam(ADSizeX, sizeX);
-  status = setIntegerParam(ADSizeY, sizeY);
+  status |= setIntegerParam(ADMinX, minX);
+  status |= setIntegerParam(ADMinY, minY);
+  status |= setIntegerParam(ADSizeX, sizeX);
+  status |= setIntegerParam(ADSizeY, sizeY);
 
   return (asynStatus)status;
 }
@@ -1473,26 +1992,22 @@ asynStatus ADTucam::setCurrentROI() {
  *
  * @return asynStatus
  */
-asynStatus ADTucam::setCameraROI() {
+asynStatus ADTucam::setCameraROI(int minX, int minY, int sizeX, int sizeY) {
   static const char *functionName = "setCameraROI";
   int status = asynSuccess;
   int tucStatus;
-  int minX, minY, sizeX, sizeY, maxSizeX, maxSizeY;
+  int maxSizeX, maxSizeY;
 
-  getIntegerParam(ADMinX, &minX);
-  getIntegerParam(ADMinY, &minY);
-  getIntegerParam(ADSizeX, &sizeX);
-  getIntegerParam(ADSizeY, &sizeY);
   getIntegerParam(ADMaxSizeX, &maxSizeX);
   getIntegerParam(ADMaxSizeY, &maxSizeY);
 
   if (minX + sizeX > maxSizeX) {
     sizeX = maxSizeX - minX;
-    status = setIntegerParam(ADSizeX, sizeX);
+    WARN_ARGS("Size X is too large, setting to %d", sizeX);
   }
   if (minY + sizeY > maxSizeY) {
     sizeY = maxSizeY - minY;
-    status = setIntegerParam(ADSizeX, sizeY);
+    WARN_ARGS("Size Y is too large, setting to %d", sizeY);
   }
 
   TUCAM_ROI_ATTR roiAttr;
@@ -1502,22 +2017,34 @@ asynStatus ADTucam::setCameraROI() {
   roiAttr.nWidth = sizeX;
   roiAttr.nHeight = sizeY;
 
-  tucStatus = TUCAM_Cap_SetROI(this->camHandle_.hIdxTUCam, roiAttr);
+  /* Release the current camera frame buffer */
+  tucStatus = sdkHandler_->releaseBuffer(this->camHandle_.hIdxTUCam);
   if (tucStatus != TUCAMRET_SUCCESS) {
-    ERR_ARGS("SetROI error, status=0x%x\n", tucStatus);
+    ERR_ARGS("Failed to release camera buffer, tucStatus=(0x%x)", tucStatus);
     return asynError;
   }
 
-  tucStatus = TUCAM_Cap_GetROI(this->camHandle_.hIdxTUCam, &roiAttr);
+  /* Set the new ROI */
+  tucStatus = sdkHandler_->setROI(this->camHandle_.hIdxTUCam, roiAttr);
   if (tucStatus != TUCAMRET_SUCCESS) {
-    ERR_ARGS("GetROI error, status=%d\n", tucStatus);
+    ERR_ARGS("Failed to set new ROI, tucStatus=(0x%x)", tucStatus);
+    // Re-allocate the old buffer
+    tucStatus = sdkHandler_->allocateBuffer(this->camHandle_.hIdxTUCam,
+                                            &this->frameHandle_);
+    if (tucStatus != TUCAMRET_SUCCESS) {
+      ERR_ARGS("Failed to re-allocate the old camera buffer, tucStatus=(0x%x)",
+               tucStatus);
+    }
     return asynError;
   }
 
-  status |= setIntegerParam(ADMinX, roiAttr.nHOffset);
-  status |= setIntegerParam(ADMinY, roiAttr.nVOffset);
-  status |= setIntegerParam(ADSizeX, roiAttr.nWidth);
-  status |= setIntegerParam(ADSizeY, roiAttr.nHeight);
+  /* Allocate the new buffer */
+  tucStatus = sdkHandler_->allocateBuffer(this->camHandle_.hIdxTUCam,
+                                          &this->frameHandle_);
+  if (tucStatus != TUCAMRET_SUCCESS) {
+    ERR_ARGS("Failed to allocate camera buffer, tucStatus=(0x%x)", tucStatus);
+    return asynError;
+  }
 
   return (asynStatus)status;
 }
@@ -1525,7 +2052,8 @@ asynStatus ADTucam::setCameraROI() {
 /**
  * @brief Get the camera information.
  * @param nID TUIDI option to read
- * @param sBuf Buffer to store the string information
+ * @param sBuf Buffer to store the string information (must be at least 1024
+ * bytes)
  * @param val Integer to store the value
  * @return asynStatus
  */
@@ -1538,20 +2066,19 @@ asynStatus ADTucam::getCamInfo(int nID, char *sBuf, int &val) {
   const int sSize = 1024;
   char sInfo[sSize] = {0};
   valInfo.pText = sInfo;
-  valInfo.nTextSize = 1024;
+  valInfo.nTextSize = sSize;
 
   valInfo.nID = nID;
-  tucStatus = TUCAM_Dev_GetInfo(camHandle_.hIdxTUCam, &valInfo);
+  tucStatus = sdkHandler_->getDeviceInfo(camHandle_.hIdxTUCam, &valInfo);
   if (tucStatus == TUCAMRET_SUCCESS) {
     val = valInfo.nValue;
-    sBuf = valInfo.pText;
+    strncpy(sBuf, valInfo.pText, sSize - 1);
+    sBuf[sSize - 1] = '\0';
     return asynSuccess;
   } else {
     ERR_ARGS("could not get %d (0x%x)", nID, tucStatus);
     return asynError;
   }
-
-  return asynSuccess;
 }
 
 /**
@@ -1609,7 +2136,7 @@ asynStatus ADTucam::setSerialNumber() {
   regRW.pBuf = &cSN[0];
   regRW.nBufSize = TUSN_SIZE;
 
-  tucStatus = TUCAM_Reg_Read(camHandle_.hIdxTUCam, regRW);
+  tucStatus = sdkHandler_->readRegister(camHandle_.hIdxTUCam, regRW);
   if (tucStatus == TUCAMRET_SUCCESS) {
     setStringParam(ADSerialNumber, cSN);
   } else {
@@ -1628,12 +2155,13 @@ asynStatus ADTucam::setSerialNumber() {
  *
  * @return asynStatus
  */
-asynStatus ADTucam::getProperty(int property, double &value) {
+asynStatus ADTucam::getProperty(int property, double *value) {
   static const char *functionName = "getProperty";
   int status = asynSuccess;
   int tucStatus;
 
-  tucStatus = TUCAM_Prop_GetValue(camHandle_.hIdxTUCam, property, &value);
+  tucStatus =
+      sdkHandler_->getPropertyValue(camHandle_.hIdxTUCam, property, value);
   if (tucStatus != TUCAMRET_SUCCESS) {
     ERR_ARGS("unable to get property %d (0x%x)", property, tucStatus);
     return asynError;
@@ -1657,7 +2185,7 @@ asynStatus ADTucam::setProperty(int property, double value) {
 
   attrProp.nIdxChn = 0;
   attrProp.idProp = property;
-  tucStatus = TUCAM_Prop_GetAttr(camHandle_.hIdxTUCam, &attrProp);
+  tucStatus = sdkHandler_->getPropertyAttr(camHandle_.hIdxTUCam, &attrProp);
   if (tucStatus == TUCAMRET_SUCCESS) {
     INFO_ARGS("property value range [%f %f]", attrProp.dbValMin,
               attrProp.dbValMax);
@@ -1669,9 +2197,10 @@ asynStatus ADTucam::setProperty(int property, double value) {
       WARN_ARGS("Clipping set max value: %d, %f\n", property, value);
     }
   }
-  INFO_ARGS("value %f", value);
+  INFO_ARGS("Setting property %d to %f", property, value);
 
-  tucStatus = TUCAM_Prop_SetValue(camHandle_.hIdxTUCam, property, value);
+  tucStatus =
+      sdkHandler_->setPropertyValue(camHandle_.hIdxTUCam, property, value);
   if (tucStatus != TUCAMRET_SUCCESS) {
     ERR_ARGS("unable to set property %d to %f (0x%x)", property, value,
              tucStatus);
@@ -1688,14 +2217,15 @@ asynStatus ADTucam::setProperty(int property, double value) {
  *
  * @return asynStatus
  */
-asynStatus ADTucam::getCapability(int property, int &val) {
+asynStatus ADTucam::getCapability(int property, int *val) {
   static const char *functionName = "getCapability";
   int status = asynSuccess;
   int tucStatus;
 
-  tucStatus = TUCAM_Capa_GetValue(this->camHandle_.hIdxTUCam, property, &val);
+  tucStatus = sdkHandler_->getCapabilityValue(this->camHandle_.hIdxTUCam,
+                                              property, val);
   if (tucStatus != TUCAMRET_SUCCESS) {
-    ERR_ARGS("unable to get capability %d=%d\n", property, val);
+    ERR_ARGS("unable to get capability %d=%d\n", property, *val);
     return asynError;
   }
   return (asynStatus)status;
@@ -1714,7 +2244,9 @@ asynStatus ADTucam::setCapability(int property, int val) {
   int status = asynSuccess;
   int tucStatus;
 
-  tucStatus = TUCAM_Capa_SetValue(this->camHandle_.hIdxTUCam, property, val);
+  INFO_ARGS("Setting capability %d to %d", property, val);
+  tucStatus = sdkHandler_->setCapabilityValue(this->camHandle_.hIdxTUCam,
+                                              property, val);
   if (tucStatus != TUCAMRET_SUCCESS) {
     ERR_ARGS("unable to set capability %d=%d (0x%x)\n", property, val,
              tucStatus);
@@ -1744,7 +2276,8 @@ asynStatus ADTucam::getCapabilityText(int property, char *strings[],
   int i = 0;
 
   TUCAM_CAPA_ATTR attrCapa;
-  tucStatus = TUCAM_Capa_GetAttr(this->camHandle_.hIdxTUCam, &attrCapa);
+  tucStatus =
+      sdkHandler_->getCapabilityAttr(this->camHandle_.hIdxTUCam, &attrCapa);
   if (tucStatus != TUCAMRET_SUCCESS) {
     ERR_ARGS("unable to get capability %d (0x%x)\n", property, tucStatus);
     *nIn = 0;
@@ -1759,7 +2292,8 @@ asynStatus ADTucam::getCapabilityText(int property, char *strings[],
     valText.nTextSize = 64;
     valText.pText = &szRes[0];
 
-    tucStatus = TUCAM_Capa_GetValueText(this->camHandle_.hIdxTUCam, &valText);
+    tucStatus = sdkHandler_->getCapabilityValueText(this->camHandle_.hIdxTUCam,
+                                                    &valText);
 
     if (tucStatus != TUCAMRET_SUCCESS) {
       ERR_ARGS("unable to get capability text %d:%d (0x%x)\n", property, i,
@@ -1781,6 +2315,7 @@ asynStatus ADTucam::getCapabilityText(int property, char *strings[],
   return (asynStatus)status;
 }
 
+#ifndef UNIT_TESTING
 /* Code for iocsh registration */
 /* ADTucamConfig */
 static const iocshArg ADTucamConfigArg0 = {"Port name", iocshArgString};
@@ -1801,3 +2336,4 @@ static void ADTucamRegister(void) {
 extern "C" {
 epicsExportRegistrar(ADTucamRegister);
 }
+#endif
