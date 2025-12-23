@@ -72,13 +72,20 @@ TEST_F(ADTucamTest, ParameterWriteFailure) {
   EXPECT_EQ(writeIntParam(&driver, ADReverseXString, 0), asynError);
   EXPECT_EQ(writeIntParam(&driver, ADReverseYString, 0), asynError);
   EXPECT_EQ(writeIntParam(&driver, ADTriggerModeString, 0), asynError);
-  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerExposureString, 0), asynError);
-  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut1ModeString, 0), asynError);
-  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut1EdgeString, 0), asynError);
-  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut2ModeString, 0), asynError);
-  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut2EdgeString, 0), asynError);
-  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut3ModeString, 0), asynError);
-  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut3EdgeString, 0), asynError);
+  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerExposureString, 0),
+            asynError);
+  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut1ModeString, 0),
+            asynError);
+  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut1EdgeString, 0),
+            asynError);
+  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut2ModeString, 0),
+            asynError);
+  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut2EdgeString, 0),
+            asynError);
+  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut3ModeString, 0),
+            asynError);
+  EXPECT_EQ(writeIntParam(&driver, ADTucam_TriggerOut3EdgeString, 0),
+            asynError);
   EXPECT_EQ(writeIntParam(&driver, ADTucam_FrameFormatString, 0), asynError);
   EXPECT_EQ(writeIntParam(&driver, ADTucam_BitDepthString, 0), asynError);
   EXPECT_EQ(writeIntParam(&driver, ADTucam_FanGearString, 0), asynError);
@@ -232,13 +239,15 @@ TEST_F(ADTucamTest, ParameterWriteSuccess) {
             asynSuccess);
   EXPECT_EQ(writeFloatParam(&driver, ADTucam_BlackLevelString, 0.0),
             asynSuccess);
-  EXPECT_EQ(writeFloatParam(&driver, ADTucam_SharpnessString, 0.0), asynSuccess);
+  EXPECT_EQ(writeFloatParam(&driver, ADTucam_SharpnessString, 0.0),
+            asynSuccess);
   EXPECT_EQ(writeFloatParam(&driver, ADTucam_NoiseLevelString, 0.0),
             asynSuccess);
   EXPECT_EQ(writeFloatParam(&driver, ADTucam_HDRKString, 0.0), asynSuccess);
   EXPECT_EQ(writeFloatParam(&driver, ADTucam_GammaString, 0.0), asynSuccess);
   EXPECT_EQ(writeFloatParam(&driver, ADTucam_ContrastString, 0.0), asynSuccess);
-  EXPECT_EQ(writeFloatParam(&driver, ADTucam_LeftLevelString, 0.0), asynSuccess);
+  EXPECT_EQ(writeFloatParam(&driver, ADTucam_LeftLevelString, 0.0),
+            asynSuccess);
   EXPECT_EQ(writeFloatParam(&driver, ADTucam_RightLevelString, 0.0),
             asynSuccess);
 }
@@ -283,11 +292,13 @@ TEST_F(ADTucamTest, TECStatusControl) {
   int value;
 
   EXPECT_EQ(writeIntParam(&driver, ADTucam_TECStatusString, 0), asynSuccess);
-  EXPECT_EQ(readIntParam(&driver, ADTucam_TECStatusString, &value), asynSuccess);
+  EXPECT_EQ(readIntParam(&driver, ADTucam_TECStatusString, &value),
+            asynSuccess);
   EXPECT_EQ(value, 0);
 
   EXPECT_EQ(writeIntParam(&driver, ADTucam_TECStatusString, 1), asynSuccess);
-  EXPECT_EQ(readIntParam(&driver, ADTucam_TECStatusString, &value), asynSuccess);
+  EXPECT_EQ(readIntParam(&driver, ADTucam_TECStatusString, &value),
+            asynSuccess);
   EXPECT_EQ(value, 1);
 }
 

@@ -174,8 +174,8 @@ class ADTucamTest : public ::testing::Test {
    * Read back a string parameter value for verification.
    * Uses the parameter library directly (public asynPortDriver method).
    */
-  asynStatus readStringParam(ADTucam* driver, const char* paramName, char* value,
-                             int maxChars) {
+  asynStatus readStringParam(ADTucam* driver, const char* paramName,
+                             char* value, int maxChars) {
     int index;
     int status = driver->findParam(paramName, &index);
     if (status != asynSuccess) {
