@@ -2,16 +2,14 @@
 TOP = .
 include $(TOP)/configure/CONFIG
 DIRS := $(DIRS) configure
-
-# Unit testing mode: skip SDK-dependent directories, only build tests
-# Usage: make UNIT_TESTING=YES
-ifeq ($(UNIT_TESTING),YES)
-DIRS := $(DIRS) tests
-else
-# Normal build: requires SDK .so files
 DIRS := $(DIRS) tucamSupport
 DIRS := $(DIRS) tucamApp
 tucamApp_DEPEND_DIRS += tucamSupport
+
+ifeq ($(UNIT_TESTING),YES)
+DIRS := $(DIRS) tests
+tests_DEPEND_DIRS += tucamApp
+else
 ifeq ($(BUILD_IOCS), YES)
 DIRS := $(DIRS) $(filter-out $(DIRS), $(wildcard iocs))
 iocs_DEPEND_DIRS += tucamApp
