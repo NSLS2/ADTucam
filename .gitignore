@@ -8,5 +8,5 @@ include/
 iocs/tucamIOC/autosave/
 *.sav*
 records.dbl
-tucamSupport/os/**/*
-st.cmd
+tucamSupport/list_cameras/list_cameras
+*.local

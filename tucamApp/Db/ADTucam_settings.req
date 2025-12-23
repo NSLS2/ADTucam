@@ -42,3 +42,7 @@ $(P)$(R)TriggerOut3Mode
 $(P)$(R)TriggerOut3Edge
 $(P)$(R)TriggerOut3Delay
 $(P)$(R)TriggerOut3Width
+$(P)$(R)PRNU
+$(P)$(R)DataFormat
+$(P)$(R)EnableGamma
+$(P)$(R)EnableBlackLevel

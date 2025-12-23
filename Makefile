@@ -5,6 +5,11 @@ DIRS := $(DIRS) configure
 DIRS := $(DIRS) tucamSupport
 DIRS := $(DIRS) tucamApp
 tucamApp_DEPEND_DIRS += tucamSupport
+# Add tests directory (optional)
+ifdef UNIT_TESTING
+DIRS := $(DIRS) tests
+tests_DEPEND_DIRS += tucamApp
+endif
 ifeq ($(BUILD_IOCS), YES)
 DIRS := $(DIRS) $(filter-out $(DIRS), $(wildcard iocs))
 iocs_DEPEND_DIRS += tucamApp
