@@ -12,6 +12,7 @@
 
 // Main function to run tests
 int main(int argc, char** argv) {
+  // Initialize Google Test/Mock
   ::testing::InitGoogleTest(&argc, argv);
   ::testing::InitGoogleMock(&argc, argv);
 
