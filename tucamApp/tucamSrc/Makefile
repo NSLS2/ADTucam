@@ -18,8 +18,6 @@ endif
 else
 # Define preprocessor flag for test builds
 USR_CPPFLAGS += -DUNIT_TESTING
-# Add include path for SDK headers (types only, no .so needed)
-USR_INCLUDES += -I$(TOP)/include
 endif
 
 DBD += tucamSupport.dbd

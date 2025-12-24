@@ -2,21 +2,17 @@
 TOP = .
 include $(TOP)/configure/CONFIG
 DIRS := $(DIRS) configure
-
-# Unit testing mode: build library with UNIT_TESTING, then tests
-ifeq ($(UNIT_TESTING),YES)
-DIRS := $(DIRS) tucamApp
-DIRS := $(DIRS) tests
-tests_DEPEND_DIRS += tucamApp
-else
-# Normal build: requires SDK .so files
 DIRS := $(DIRS) tucamSupport
 DIRS := $(DIRS) tucamApp
 tucamApp_DEPEND_DIRS += tucamSupport
+# Unit testing mode: build library with UNIT_TESTING, then tests
+ifeq ($(UNIT_TESTING),YES)
+DIRS := $(DIRS) tests
+tests_DEPEND_DIRS += tucamApp
+endif
 ifeq ($(BUILD_IOCS), YES)
 DIRS := $(DIRS) $(filter-out $(DIRS), $(wildcard iocs))
 iocs_DEPEND_DIRS += tucamApp
-endif
 endif
 include $(TOP)/configure/RULES_TOP
 
