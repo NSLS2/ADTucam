@@ -12,7 +12,7 @@ May need minor changes to support other Tucsen cameras.
 >   * We have a separate timeout thread as a fallback
 > * Software triggering is completely unreliable and suffers waiting forever for the frame to arrive
 >   * Use hardware triggering or free run mode
-> 
+>
 > We are unsure if these issues persist on other cameras, frame grabbers, software versions, etc.
 
 ## Quick Setup
