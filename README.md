@@ -10,6 +10,8 @@ May need minor changes to support other Tucsen cameras.
 > There are still some issues that are not resolved with the TUCAM SDK.
 > * Timeouts on `waitForFrame` don't always work (we have a separate timeout thread as a fallback)
 > * Software triggering is completely unreliable and suffers waiting forever for the frame to arrive
+> 
+> We are unsure if these issues persist on other cameras, frame grabbers, software versions, etc.
 
 ## Quick Setup
 
