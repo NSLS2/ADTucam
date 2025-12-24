@@ -8,8 +8,10 @@ May need minor changes to support other Tucsen cameras.
 
 > [!WARNING]
 > There are still some issues that are not resolved with the TUCAM SDK.
-> * Timeouts on `waitForFrame` don't always work (we have a separate timeout thread as a fallback)
+> * Timeouts on `waitForFrame` don't always work
+>   * We have a separate timeout thread as a fallback
 > * Software triggering is completely unreliable and suffers waiting forever for the frame to arrive
+>   * Use hardware triggering or free run mode
 > 
 > We are unsure if these issues persist on other cameras, frame grabbers, software versions, etc.
 
@@ -34,3 +36,7 @@ make install
 cd iocs/tucamIOC/iocBoot
 ./st.cmd
 ```
+
+## Ophyd Device Support
+
+There is an implementation of an Ophyd device for this IOC here: https://github.com/NSLS2/csx-profile-collection/blob/11aed998787c442ceb02c38873fc34879efc3c03/startup/csx1/devices/areadetector.py#L673
