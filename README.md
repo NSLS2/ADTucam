@@ -1,5 +1,5 @@
 # ADTucam
-EPICS areaDetector driver for communicting with detectors using the TUCAM SDK, written for the Tucsen Dhyana XF4040BSI at CSX.
+EPICS areaDetector driver for communicating with detectors using the TUCAM SDK, originally written for the Tucsen Dhyana XF4040BSI at CSX which also uses a ActiveSilicon FireBird frame grabber PCIe card.
 
 May need minor changes to support other Tucsen cameras.
 
