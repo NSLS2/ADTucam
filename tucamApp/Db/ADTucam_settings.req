@@ -1,9 +1,7 @@
-$(P)$(R)TEC
 $(P)$(R)GainMode
 $(P)$(R)TemperatureSetpoint
 $(P)$(R)BinMode
 $(P)$(R)AutoTECThreshold
-$(P)$(R)AutoTEC
 $(P)$(R)RetryOnTimeout
 $(P)$(R)NumRetries
 $(P)$(R)FrameSpeed
