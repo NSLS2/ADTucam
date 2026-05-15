@@ -131,6 +131,14 @@ record(ai, "$(P)$(R)TemperatureSetpoint_RBV") {
 record(ai, "$(P)$(R)Temperature_RBV") {
    field(DTYP, "asynFloat64")
    field(INP,  "@asyn($(PORT),$(ADDR),$(TIMEOUT))TUCAM_TEMP")
+   field(HIHI, "45")
+   field(HIGH, "35")
+   field(LOW, "-35")
+   field(LOLO, "-40")
+   field(HHSV, "MAJOR")
+   field(HSV,  "MINOR")
+   field(LSV,  "MINOR")
+   field(LLSV, "MAJOR")
    field(SCAN, "I/O Intr")
 }
 

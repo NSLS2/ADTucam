@@ -1,3 +1,11 @@
+$(P)$(R)Temperature_RBV.HIHI
+$(P)$(R)Temperature_RBV.LOLO
+$(P)$(R)Temperature_RBV.HIGH
+$(P)$(R)Temperature_RBV.LOW
+$(P)$(R)Temperature_RBV.HHSV
+$(P)$(R)Temperature_RBV.HSV
+$(P)$(R)Temperature_RBV.LSV
+$(P)$(R)Temperature_RBV.LLSV
 $(P)$(R)GainMode
 $(P)$(R)TemperatureSetpoint
 $(P)$(R)BinMode
